@@ -1,0 +1,5 @@
+encryptedUser: "v9QwZXKnAY7Qb9TIkT5fKA=="
+connections:
+  - name: "Test"
+    loginServer: "login-test"
+    destServer: "server-test"
