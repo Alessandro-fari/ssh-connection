@@ -34,15 +34,6 @@ A Python application that provides a system tray interface for managing SSH conn
 
 Before starting, make sure you have Python 3.8+ installed.
 
-### Installing Dependencies
-
-```bash
-# Install base dependencies
-pip install -r requirements.txt
-
-# For creating the executable, also install PyInstaller
-pip install pyinstaller
-```
 
 ### Local Development
 
@@ -51,20 +42,12 @@ pip install pyinstaller
 python run.py
 ```
 
-**Method 2 - Package installation:**
-```bash
-# Install the package in development mode
-pip install -e .
-
-# Run the command
-ssh-connection
-```
 
 ### Creating Executable (.exe)
 
 The project includes automated scripts for creating the executable:
 
-**Method 1 - Automated Script (Recommended):**
+**Automated Script:**
 ```bash
 python build_release.py
 ```
@@ -74,14 +57,6 @@ This script:
 - Generates the executable in `dist/SSH-Connection-Manager.exe`
 - Configures Windows auto-startup
 
-**Method 2 - Manual PyInstaller:**
-```bash
-# Using the existing .spec file
-pyinstaller SSH-Connection-Manager.spec
-
-# Or direct command
-pyinstaller --onefile --windowed --name SSH-Connection-Manager --icon resources/icon.ico run.py
-```
 
 **Generated Files:**
 - `dist/SSH-Connection-Manager.exe` - The final executable
