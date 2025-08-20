@@ -1,0 +1,91 @@
+# SSH Connection Manager - Example Configuration
+# This configuration demonstrates how to set up jump hosts, database tunnels, and port forwarding
+# Copy this to ~/.ssh/config and customize with your own servers and ports
+
+# Global settings applied to all hosts
+# These settings keep connections alive and optimize performance
+Host *
+    Ciphers aes128-ctr
+    MACs hmac-sha2-256
+    ServerAliveInterval 60
+    ServerAliveCountMax 3
+
+# Automatic Database Tunnels
+# These patterns automatically create database tunnels when connecting to hosts that match the pattern
+# The application checks if the hostname CONTAINS these patterns and automatically applies the LocalForward
+# 
+# Examples of matching hostnames:
+# - app-server-tf01 matches "*tf*" → gets Finance Test DB tunnel (port 1524)
+# - web-server-te01 matches "*te*" → gets Enterprise Test DB tunnel (port 1523)
+# - app-server-pf01 matches "*pf*" → gets Finance Prod DB tunnel (port 31524)
+# - web-server-pe01 matches "*pe*" → gets Enterprise Prod DB tunnel (port 31523)
+
+# Test Environment Database Tunnels (any hostname containing 'tf' gets this tunnel)
+Host *tf*
+    LocalForward 1524 test-db-finance:1524
+
+# Test Environment Database Tunnels (any hostname containing 'te' gets this tunnel)  
+Host *te*
+    LocalForward 1523 test-db-enterprise:1523
+
+# Production Environment Database Tunnels (any hostname containing 'pf' gets this tunnel)
+Host *pf*
+    LocalForward 31524 prod-db-finance:1524
+
+# Production Environment Database Tunnels (any hostname containing 'pe' gets this tunnel)
+Host *pe*
+    LocalForward 31523 prod-db-enterprise:1523
+
+############################################
+#                TEST                      #
+############################################
+
+# Jump host for test environment - all test connections go through here
+Host login_test
+    HostName 10.180.22.100
+    # Create tunnels to target servers (port 2xxx range for test)
+    LocalForward 2222 app-server-tf01:22
+    LocalForward 2223 web-server-te01:22
+
+# Application Server - Test Finance
+Host app-server-tf01
+    HostName localhost
+    Port 2222
+    # Forward application ports
+    LocalForward 8080 localhost:8080
+    LocalForward 9090 localhost:9090
+
+# Web Server - Test Enterprise  
+Host web-server-te01
+    HostName localhost
+    Port 2223
+    # Forward web service ports
+    LocalForward 80 localhost:80
+    LocalForward 443 localhost:443
+
+############################################
+#                PROD                      #
+############################################
+
+# Jump host for production environment - all prod connections go through here
+Host login_prod
+    HostName 10.101.22.200
+    # Create tunnels to target servers (port 3xxx range for production)
+    LocalForward 3222 app-server-pf01:22
+    LocalForward 3223 web-server-pe01:22
+
+# Application Server - Production Finance
+Host app-server-pf01
+    HostName localhost
+    Port 3222
+    # Forward application ports
+    LocalForward 8080 localhost:8080
+    LocalForward 9090 localhost:9090
+
+# Web Server - Production Enterprise
+Host web-server-pe01
+    HostName localhost
+    Port 3223
+    # Forward web service ports
+    LocalForward 80 localhost:80
+    LocalForward 443 localhost:443	
