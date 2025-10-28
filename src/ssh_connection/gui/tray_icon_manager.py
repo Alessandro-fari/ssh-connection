@@ -2,6 +2,9 @@ import pystray
 from PIL import Image, ImageDraw
 import threading
 from typing import Dict, List
+import os
+from pathlib import Path
+import sys
 
 from ..ssh.ssh_config_parser import SshConfigParser
 from ..ssh.ssh_launcher import SshLauncher
@@ -74,10 +77,23 @@ class TrayIconManager:
         
         # Add separator and exit option
         menu_items.append(pystray.Menu.SEPARATOR)
+        menu_items.append(pystray.MenuItem("Settings", self.open_settings))
+        menu_items.append(pystray.MenuItem("Reboot", self.reboot_application))
         menu_items.append(pystray.MenuItem("Exit", self.quit_application))
         
         return pystray.Menu(*menu_items)
     
+    def open_settings(self, icon: pystray.Icon, item) -> None:
+        """Open the SSH config file in the default editor"""
+        try:
+            ssh_config_path = Path.home() / ".ssh" / "config"
+            if ssh_config_path.exists():
+                os.startfile(ssh_config_path)
+            else:
+                print(f"SSH config file not found: {ssh_config_path}")
+        except Exception as e:
+            print(f"Error opening SSH config: {e}")
+
     def connect_to_host(self, host: str) -> None:
         """
         Connect to specified SSH host
@@ -88,6 +104,15 @@ class TrayIconManager:
         print(f"Connecting to {host}...")
         SshLauncher.connect(host)
     
+    def reboot_application(self, icon: pystray.Icon, item) -> None:
+        """Restart the application"""
+        print("Rebooting application...")
+        try:
+            self.icon.stop()
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        except Exception as e:
+            print(f"Error rebooting application: {e}")
+
     def quit_application(self, icon: pystray.Icon, item) -> None:
         """
         Quit the application
