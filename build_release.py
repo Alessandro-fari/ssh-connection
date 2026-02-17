@@ -67,6 +67,10 @@ def build_exe():
     src_path = Path("src").absolute()
     resources_path = Path("resources").absolute()
     
+    # PyInstaller needs platform-specific separator for --add-data
+    # Windows uses ';', Unix uses ':'
+    separator = ';' if os.name == 'nt' else ':'
+    
     cmd = [
         python_cmd, "-m", "PyInstaller",
         "--onefile", "--windowed",  # No console window
@@ -74,7 +78,7 @@ def build_exe():
         "--distpath", "dist",
         "--workpath", "build",
         "--paths", str(src_path),
-        "--add-data", f"{resources_path};resources",
+        "--add-data", f"{resources_path}{separator}resources",
         "--hiddenimport", "ssh_connection",
         "--hiddenimport", "ssh_connection.main",
         "--hiddenimport", "ssh_connection.gui.tray_icon_manager",
@@ -82,8 +86,11 @@ def build_exe():
         "--hiddenimport", "ssh_connection.ssh.ssh_launcher",
         "--hiddenimport", "ssh_connection.config.config_loader",
         "--hiddenimport", "ssh_connection.security.crypto_util",
+        "--hiddenimport", "pystray._win32",  # Fix for pystray on Windows
+        "--hiddenimport", "PIL._tkinter_finder",  # Fix for Pillow
         "--icon", "resources/icon.ico",
         "--clean",
+        "--noconfirm",  # Don't ask for confirmation
         "run.py"
     ]
     

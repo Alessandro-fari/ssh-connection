@@ -106,12 +106,70 @@ class TrayIconManager:
     
     def reboot_application(self, icon: pystray.Icon, item) -> None:
         """Restart the application"""
+        import subprocess
+        import logging
+        
+        logging.info("Rebooting application...")
         print("Rebooting application...")
+        
         try:
+            # Stop the tray icon first
             self.icon.stop()
-            os.execv(sys.executable, [sys.executable] + sys.argv)
+            
+            if getattr(sys, 'frozen', False):
+                # Running as compiled executable - use batch launcher for reliability
+                exe_path = Path(sys.executable)
+                project_root = exe_path.parent.parent  # Go up from dist/ to project root
+                launcher_script = project_root / "reboot_launcher.bat"
+                
+                if launcher_script.exists():
+                    # Use the batch launcher (more reliable for PyInstaller)
+                    logging.info(f"Using batch launcher: {launcher_script}")
+                    subprocess.Popen(
+                        [str(launcher_script)],
+                        shell=True,
+                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                        cwd=str(project_root)
+                    )
+                else:
+                    # Fallback: direct exe launch with proper working directory
+                    logging.info(f"Launcher not found, direct restart: {exe_path}")
+                    subprocess.Popen(
+                        [str(exe_path)],
+                        creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+                        cwd=str(exe_path.parent)  # Set working directory to exe location
+                    )
+            else:
+                # Running as Python script - simple restart
+                executable = sys.executable
+                args = [executable] + sys.argv
+                logging.info(f"Restarting Python script: {' '.join(args)}")
+                subprocess.Popen(
+                    args,
+                    creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+                )
+            
+            logging.info("Reboot initiated, exiting current instance")
+            print("Reboot initiated successfully")
+            
+            # Exit cleanly
+            os._exit(0)
+            
         except Exception as e:
-            print(f"Error rebooting application: {e}")
+            error_msg = f"Error rebooting application: {e}"
+            logging.error(error_msg, exc_info=True)
+            print(error_msg)
+            
+            # Show error notification
+            try:
+                if getattr(sys, 'frozen', False):
+                    import ctypes
+                    ctypes.windll.user32.MessageBoxW(0, 
+                        f"Failed to reboot:\n\n{error_msg}", 
+                        "SSH Connection Manager - Reboot Error", 
+                        0x10)  # MB_ICONERROR
+            except:
+                pass
 
     def quit_application(self, icon: pystray.Icon, item) -> None:
         """
