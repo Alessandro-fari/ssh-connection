@@ -27,7 +27,7 @@ def install_dependencies():
     """Install required dependencies"""
     python_cmd = get_python_executable()
     
-    dependencies = ["pyinstaller", "pywin32", "pystray", "pillow", "pyyaml", "cryptography", "pyautogui", "psutil"]
+    dependencies = ["pyinstaller", "pywin32", "pystray", "pillow", "pyyaml", "cryptography", "psutil"]
     
     print("Installing dependencies...")
     for dep in dependencies:
@@ -84,6 +84,8 @@ def build_exe():
         "--hiddenimport", "ssh_connection.gui.tray_icon_manager",
         "--hiddenimport", "ssh_connection.ssh.ssh_config_parser",
         "--hiddenimport", "ssh_connection.ssh.ssh_launcher",
+        "--hiddenimport", "ssh_connection.ssh.console_injector",
+        "--hiddenimport", "ssh_connection.ssh.connection_tracker",
         "--hiddenimport", "ssh_connection.config.config_loader",
         "--hiddenimport", "ssh_connection.security.crypto_util",
         "--hiddenimport", "pystray._win32",  # Fix for pystray on Windows

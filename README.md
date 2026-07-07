@@ -9,9 +9,10 @@ A Python application that provides a system tray interface for managing SSH conn
 - **Environment Separation**: Separates hosts into TEST and PROD sections based on comments
 - **One-Click Connections**: Connect to any configured SSH host with a single click
 - **Jump Host Support**: Connect through bastion/jump servers (login servers) seamlessly
-- **Automated Authentication**: Automatically inputs passwords for SSH connections
-- **Persistent Sessions**: Once connected to a jump host, maintains the session so you don't need to re-enter passwords for subsequent connections through the same tunnel
-- **Auto-Password Input**: Automatically enters stored passwords when prompted, eliminating manual password entry for each connection
+- **Targeted Password Input**: Injects the password directly into the input buffer of the SSH terminal it opened (Windows console APIs), as soon as the password prompt appears — it never types into another window, even if you switch focus. Host-key confirmation prompts (`yes/no`) are answered automatically
+- **Live Connection Status**: menu items show the connection state per host — TEST uses circles (⚪ idle / 🟢 connected), PROD uses squares (⬜ idle / 🟩 connected) — and the tray icon turns green with a counter while connections are open
+- **Automatic Jump Host Startup**: connecting to a machine whose jump host (`login_test` / `login_prod`) is not open yet launches the jump host first, waits for its tunnels, then opens the machine
+- **Config Hot-Reload**: edits to `~/.ssh/config` (new machines, new forwarded ports) are picked up automatically — no application restart needed; changes apply to the next tunnel you open
 - **Automatic Database Tunnels**: Automatically creates SSH tunnels to test databases based on hostname patterns (e.g., `*it1tf*` → Finance DB, `*it1te*` → Enterprise DB)
 - **Configuration Management**: YAML-based configuration with encryption support and Maven integration
 

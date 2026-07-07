@@ -7,17 +7,25 @@ class SshConfigParser:
     """Parser for SSH configuration files that organizes hosts into TEST and PROD sections"""
     
     @staticmethod
-    def parse_ssh_config() -> Dict[str, List[str]]:
+    def get_config_path() -> Path:
+        """Path of the SSH config file used by the application"""
+        return Path.home() / ".ssh" / "config"
+
+    @staticmethod
+    def parse_ssh_config(config_path: Path = None) -> Dict[str, List[str]]:
         """
         Parse SSH config file and extract hosts organized by TEST/PROD sections
-        
+
+        Args:
+            config_path: Optional path override (defaults to ~/.ssh/config)
+
         Returns:
             Dict mapping section names (TEST, PROD) to lists of hostnames
         """
         host_map = {"TEST": [], "PROD": []}
         current_section = None
-        
-        ssh_config_path = Path.home() / ".ssh" / "config"
+
+        ssh_config_path = config_path or SshConfigParser.get_config_path()
         
         try:
             with open(ssh_config_path, 'r', encoding='utf-8') as file:
