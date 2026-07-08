@@ -1,6 +1,8 @@
+import ctypes
 import logging
 import os
 import threading
+from ctypes import wintypes
 from pathlib import Path
 
 import pystray
@@ -9,6 +11,27 @@ from PIL import Image, ImageDraw
 from ..ssh.connection_tracker import tracker
 from ..ssh.ssh_config_parser import SshConfigParser
 from ..ssh.ssh_launcher import SshLauncher
+
+
+class _GUITHREADINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("hwndActive", wintypes.HWND),
+        ("hwndFocus", wintypes.HWND),
+        ("hwndCapture", wintypes.HWND),
+        ("hwndMenuOwner", wintypes.HWND),
+        ("hwndMoveSize", wintypes.HWND),
+        ("hwndCaret", wintypes.HWND),
+        ("rcCaret", wintypes.RECT),
+    ]
+
+
+# GetGUIThreadInfo flags signalling the thread is showing a (popup/system) menu
+_GUI_INMENUMODE = 0x00000004
+_GUI_SYSTEMMENUMODE = 0x00000008
+_GUI_POPUPMENUMODE = 0x00000010
+_GUI_MENU_FLAGS = _GUI_INMENUMODE | _GUI_SYSTEMMENUMODE | _GUI_POPUPMENUMODE
 
 
 class TrayIconManager:
@@ -133,11 +156,37 @@ class TrayIconManager:
             mtime = None
         return (mtime, frozenset(tracker.active_hosts()))
 
+    def _menu_is_open(self) -> bool:
+        """True while the tray popup menu is displayed to the user.
+
+        Rebuilding the native HMENU (update_menu / bitmap decoration) while
+        the popup is on screen makes Windows redraw it under the cursor,
+        which reads as flicker. We detect the open menu via the menu thread's
+        GUI mode flags and defer the refresh until it closes.
+        """
+        try:
+            hwnd = getattr(self.icon, "_menu_hwnd", None)
+            if not hwnd:
+                return False
+            tid = ctypes.windll.user32.GetWindowThreadProcessId(hwnd, None)
+            info = _GUITHREADINFO()
+            info.cbSize = ctypes.sizeof(_GUITHREADINFO)
+            if ctypes.windll.user32.GetGUIThreadInfo(tid, ctypes.byref(info)):
+                return bool(info.flags & _GUI_MENU_FLAGS)
+        except Exception as e:
+            logging.debug(f"Menu-open probe failed: {e}")
+        return False
+
     def _refresh_loop(self) -> None:
         """Re-render menu and icon whenever the SSH config file changes on
         disk or a connection is opened/closed."""
         while not self._stop_event.wait(self.REFRESH_SECONDS):
             if self.icon is None:
+                continue
+            # Never touch the menu while the user has it open — it would
+            # flicker. The change is picked up on the next tick after it closes
+            # (state != _last_state keeps it pending).
+            if self._menu_is_open():
                 continue
             state = self._current_state()
             if state != self._last_state:
