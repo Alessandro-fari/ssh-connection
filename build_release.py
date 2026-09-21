@@ -33,9 +33,9 @@ def install_dependencies():
     for dep in dependencies:
         try:
             subprocess.run([python_cmd, "-m", "pip", "install", dep], check=True, capture_output=True)
-            print(f"✓ {dep}")
+            print(f"[OK] {dep}")
         except subprocess.CalledProcessError:
-            print(f"✗ Failed to install {dep}")
+            print(f"[FAIL] Failed to install {dep}")
 
 def create_icon():
     """Create app icon"""
@@ -83,10 +83,15 @@ def build_exe():
         "--hiddenimport", "ssh_connection.main",
         "--hiddenimport", "ssh_connection.gui.tray_icon_manager",
         "--hiddenimport", "ssh_connection.gui.win32_menu_bitmaps",
+        "--hiddenimport", "ssh_connection.gui.hotkey_manager",
+        "--hiddenimport", "ssh_connection.gui.search_dialog",
         "--hiddenimport", "ssh_connection.ssh.ssh_config_parser",
         "--hiddenimport", "ssh_connection.ssh.ssh_launcher",
         "--hiddenimport", "ssh_connection.ssh.console_injector",
         "--hiddenimport", "ssh_connection.ssh.connection_tracker",
+        "--hiddenimport", "ssh_connection.ssh.init_orchestrator",
+        "--hiddenimport", "tkinter",
+        "--hiddenimport", "tkinter.simpledialog",
         "--hiddenimport", "ssh_connection.config.config_loader",
         "--hiddenimport", "ssh_connection.security.crypto_util",
         "--hiddenimport", "pystray._win32",  # Fix for pystray on Windows
@@ -102,10 +107,10 @@ def build_exe():
     if result.returncode == 0:
         exe_path = Path("dist/SSH-Connection-Manager.exe")
         if exe_path.exists():
-            print(f"✓ Executable created: {exe_path}")
+            print(f"[OK] Executable created: {exe_path}")
             return exe_path
     
-    print("✗ Build failed!")
+    print("[FAIL] Build failed!")
     return None
 
 def create_startup_shortcut(exe_path):
@@ -124,10 +129,10 @@ def create_startup_shortcut(exe_path):
         shortcut.Description = "SSH Connection Manager - System Tray SSH Tool"
         shortcut.save()
         
-        print(f"✓ Auto-startup configured: {shortcut_path}")
+        print(f"[OK] Auto-startup configured: {shortcut_path}")
         return True
     except Exception as e:
-        print(f"✗ Could not create startup shortcut: {e}")
+        print(f"[FAIL] Could not create startup shortcut: {e}")
         return False
 
 def main():
@@ -150,7 +155,7 @@ def main():
         create_startup_shortcut(exe_path)
         
         print("\n" + "=" * 50)
-        print("✓ Release build completed!")
+        print("[OK] Release build completed!")
         print(f"Executable: {exe_path}")
         print("- Runs silently in system tray")
         print("- Starts automatically with Windows")

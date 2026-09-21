@@ -8,6 +8,7 @@ A Python application that provides a system tray interface for managing SSH conn
 - **SSH Config Parsing**: Automatically reads `~/.ssh/config` and organizes hosts
 - **Environment Separation**: Separates hosts into TEST and PROD sections based on comments
 - **One-Click Connections**: Connect to any configured SSH host with a single click
+- **Host Search (Ctrl+Shift+Space)**: A global hotkey opens a search popup (pre-loaded at startup, so it appears instantly) to find and connect to any host by typing — arrow keys navigate (skipping the TEST/PROD separators), Enter connects, Esc cancels. A Tutti/TEST/PROD combo narrows the scope and the last choice is remembered for next time. Each TEST/PROD submenu also has a **"Cerca..."** entry that opens the same dialog pre-filtered to that environment.
 - **Jump Host Support**: Connect through bastion/jump servers (login servers) seamlessly
 - **Targeted Password Input**: Injects the password directly into the input buffer of the SSH terminal it opened (Windows console APIs), as soon as the password prompt appears — it never types into another window, even if you switch focus. Host-key confirmation prompts (`yes/no`) are answered automatically
 - **Live Connection Status**: menu items show the connection state per host — TEST uses circles (⚪ idle / 🟢 connected), PROD uses squares (⬜ idle / 🟩 connected) — and the tray icon turns green with a counter while connections are open
@@ -15,6 +16,11 @@ A Python application that provides a system tray interface for managing SSH conn
 - **Config Hot-Reload**: edits to `~/.ssh/config` (new machines, new forwarded ports) are picked up automatically — no application restart needed; changes apply to the next tunnel you open
 - **Automatic Database Tunnels**: Automatically creates SSH tunnels to test databases based on hostname patterns (e.g., `*it1tf*` → Finance DB, `*it1te*` → Enterprise DB)
 - **Configuration Management**: YAML-based configuration with encryption support and Maven integration
+
+## Documentation
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — internal architecture and how the application works
+- [CHANGELOG.md](CHANGELOG.md) — history of changes, improvements and notes (**must be updated with every change**)
 
 ## Requirements
 

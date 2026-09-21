@@ -15,9 +15,13 @@ import threading
 import time
 
 kernel32 = ctypes.windll.kernel32
+user32 = ctypes.windll.user32
+kernel32.GetConsoleWindow.restype = wt.HWND
 
 # Console attachment is process-wide state: only one injection at a time.
 _console_lock = threading.Lock()
+
+SW_HIDE = 0
 
 GENERIC_READ = 0x80000000
 GENERIC_WRITE = 0x40000000
@@ -67,6 +71,10 @@ class ConsoleInjector:
     """Injects keystrokes into the console owned by a specific PID."""
 
     PROMPT_TOKENS = ("password", "passphrase", "passcode")
+    # Extra tokens accepted for the secrets after the first one (e.g. a 2FA
+    # token prompt). Kept separate so they can't false-match the very first
+    # password prompt of a plain connection.
+    EXTRA_PROMPT_TOKENS = ("token", "otp", "verification code", "codice")
     HOSTKEY_TOKEN = "yes/no"
 
     @classmethod
@@ -76,13 +84,24 @@ class ConsoleInjector:
         password followed by Enter — directly into that console's input
         buffer. Returns True on success.
         """
+        return cls.inject_secrets(pid, [password], timeout)
+
+    @classmethod
+    def inject_secrets(cls, pid: int, secrets, timeout: float = 30.0) -> bool:
+        """
+        Answer a sequence of prompts in the console of `pid`, one secret per
+        prompt (e.g. [password, 2fa_token]). Each subsequent prompt is only
+        matched once the cursor has moved past the line of the previous one,
+        so the same prompt is never answered twice. Returns True when all
+        secrets were injected.
+        """
         with _console_lock:
-            return cls._inject_locked(pid, password, timeout)
+            return cls._inject_locked(pid, list(secrets), timeout)
 
     # ------------------------------------------------------------------
 
     @classmethod
-    def _inject_locked(cls, pid: int, password: str, timeout: float) -> bool:
+    def _inject_locked(cls, pid: int, secrets, timeout: float) -> bool:
         original_pid = cls._sibling_console_pid()
         attached = False
         try:
@@ -99,6 +118,9 @@ class ConsoleInjector:
 
             try:
                 answered_hostkey = False
+                idx = 0
+                last_prompt_y = -1
+                last_prompt_line = ""
                 deadline = time.monotonic() + timeout
                 while time.monotonic() < deadline:
                     if not cls._pid_alive(pid):
@@ -106,6 +128,9 @@ class ConsoleInjector:
                         return False
 
                     tail = cls._read_tail(conout, lines=4).lower()
+                    cursor_y = cls._cursor_y(conout)
+                    last_line = next(
+                        (l.strip() for l in reversed(tail.splitlines()) if l.strip()), "")
 
                     if not answered_hostkey and cls.HOSTKEY_TOKEN in tail:
                         cls._write_text(conin, "yes")
@@ -114,15 +139,23 @@ class ConsoleInjector:
                         time.sleep(0.4)
                         continue
 
-                    if any(tok in tail for tok in cls.PROMPT_TOKENS):
-                        cls._write_text(conin, password)
+                    if cls._prompt_ready(last_line, idx, cursor_y,
+                                         last_prompt_y, last_prompt_line):
+                        cls._write_text(conin, secrets[idx])
                         cls._write_key(conin, VK_RETURN, "\r")
-                        logging.info(f"Password injected into console of PID {pid}")
-                        return True
+                        last_prompt_y = cursor_y
+                        last_prompt_line = last_line
+                        idx += 1
+                        logging.info(f"Secret {idx}/{len(secrets)} injected into console of PID {pid}")
+                        if idx == len(secrets):
+                            return True
+                        time.sleep(0.3)
+                        continue
 
                     time.sleep(0.15)
 
-                logging.warning(f"Timed out waiting for password prompt (PID {pid})")
+                logging.warning(
+                    f"Timed out waiting for prompt {idx + 1}/{len(secrets)} (PID {pid})")
                 return False
             finally:
                 kernel32.CloseHandle(conout)
@@ -133,6 +166,49 @@ class ConsoleInjector:
             kernel32.FreeConsole()
             if original_pid:
                 kernel32.AttachConsole(wt.DWORD(original_pid))
+
+    @classmethod
+    def _prompt_ready(cls, last_line: str, idx: int, cursor_y: int,
+                      last_prompt_y: int, last_prompt_line: str) -> bool:
+        """Whether `last_line` (the last non-empty console line) is the prompt
+        awaiting the idx-th secret."""
+        if idx == 0:
+            return any(tok in last_line for tok in cls.PROMPT_TOKENS)
+        # Later prompts (e.g. the 2FA token): pressing Enter on the previous
+        # prompt moves the cursor to a blank line BEFORE the server prints the
+        # next prompt, so the old prompt line lingers as the last non-empty
+        # line. Require a genuinely NEW prompt line (different text, cursor
+        # advanced) — otherwise the token would be injected into the void
+        # before the token prompt appears.
+        if cursor_y <= last_prompt_y:
+            return False
+        if not last_line or last_line == last_prompt_line:
+            return False
+        return (any(tok in last_line for tok in cls.PROMPT_TOKENS + cls.EXTRA_PROMPT_TOKENS)
+                or last_line.endswith(":"))
+
+    @classmethod
+    def hide_console_window(cls, pid: int, timeout: float = 5.0) -> bool:
+        """
+        Hide the window of the console owned by `pid` (ShowWindow SW_HIDE).
+        Safety net for launches with STARTUPINFO wShowWindow=SW_HIDE, which
+        Windows Terminal may ignore when it is the default terminal.
+        """
+        with _console_lock:
+            original_pid = cls._sibling_console_pid()
+            try:
+                if not cls._attach(pid, timeout=timeout):
+                    logging.warning(f"Could not attach to console of PID {pid} to hide it")
+                    return False
+                hwnd = kernel32.GetConsoleWindow()
+                if not hwnd:
+                    return False
+                user32.ShowWindow(hwnd, SW_HIDE)
+                return True
+            finally:
+                kernel32.FreeConsole()
+                if original_pid:
+                    kernel32.AttachConsole(wt.DWORD(original_pid))
 
     @classmethod
     def run_command_at_shell_prompt(cls, pid: int, command: str, timeout: float = 240.0) -> bool:
@@ -249,6 +325,14 @@ class ConsoleInjector:
             return psutil.pid_exists(pid) and psutil.Process(pid).is_running()
         except Exception:
             return False
+
+    @staticmethod
+    def _cursor_y(conout) -> int:
+        """Current cursor row in the console screen buffer (-1 on failure)."""
+        info = _CONSOLE_SCREEN_BUFFER_INFO()
+        if not kernel32.GetConsoleScreenBufferInfo(conout, ctypes.byref(info)):
+            return -1
+        return info.dwCursorPosition.Y
 
     @staticmethod
     def _read_tail(conout, lines: int = 4) -> str:

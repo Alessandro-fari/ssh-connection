@@ -5,7 +5,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional, Sequence
 
 from ..config.config_loader import ConfigLoader
 from .connection_tracker import tracker
@@ -153,51 +153,95 @@ class SshLauncher:
         return shutil.which('ssh') or 'ssh'
 
     @staticmethod
-    def _launch(name: str) -> bool:
+    def _launch(name: str, *, hidden: bool = False,
+                secrets: Optional[Sequence[str]] = None,
+                register: bool = True,
+                keepalive: Optional[bool] = None,
+                inject_timeout: float = 30.0) -> Optional[int]:
         """
-        Open a new terminal running ssh to `name`, register it in the
-        connection tracker and inject the password into that terminal only.
+        Open a new terminal running ssh to `name`, optionally register it in
+        the connection tracker and inject credentials into that terminal only.
 
-        Returns True if the password was injected successfully (or no
-        password was needed), False otherwise.
+        - hidden: create the console with its window hidden (SW_HIDE) so it
+          stays out of the taskbar/Alt-Tab while remaining a real console
+          (injection via AttachConsole keeps working).
+        - secrets: the sequence of secrets to answer prompts with; defaults
+          to [password]. Pass e.g. [password, token] for a login needing 2FA.
+        - register: whether to record the connection in the tracker (skip it
+          for hidden helper connections that must not show up in the menu).
+        - keepalive: force sending the keepalive command; defaults to the
+          historical rule (only for login* hosts).
+
+        Returns the console-owning PID on success (credentials injected or
+        none needed), or None on failure.
         """
         config = ConfigLoader.load()
         username = config.get_username()
         password = config.get_password()
 
         target = f"{username}@{name}" if username else name
-        logging.info(f"Launching SSH terminal for {target}")
+        logging.info(f"Launching SSH terminal for {target}{' (hidden)' if hidden else ''}")
 
         # Spawn PowerShell directly (no `cmd /c start`) so we own the PID of
         # the process that owns the new console — required both for targeted
         # password injection and for tracking the connection status.
+        startupinfo = None
+        if hidden:
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            startupinfo.wShowWindow = 0  # SW_HIDE
+
         process = subprocess.Popen(
             ['powershell', '-NoExit', '-Command', f"& '{SshLauncher._ssh_executable()}' {target}"],
             creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP,
+            startupinfo=startupinfo,
             close_fds=True,
         )
-        tracker.register(name, process.pid)
+        if register:
+            tracker.register(name, process.pid)
 
-        if not password:
-            logging.info("No password available - skipping credential input")
-            return True
+        if hidden:
+            # Belt-and-braces: Windows Terminal (when default) ignores
+            # wShowWindow, so hide the console window explicitly too.
+            ConsoleInjector.hide_console_window(process.pid)
 
-        # Blocks until the password prompt appears in THAT console and the
-        # password is written into its input buffer (focus-independent).
-        injected = ConsoleInjector.inject_password(process.pid, password)
+        if secrets is None:
+            secrets = [password] if password else []
 
-        if injected and name.lower().startswith("login"):
-            # Once the jump host login completes (after the manual 2FA
-            # token), run the keepalive so the session and its tunnels
-            # don't expire. Runs in background: the shell prompt may take
-            # a while to appear while the user types the token.
+        if not secrets:
+            logging.info("No credentials to inject - skipping credential input")
+        else:
+            # Blocks until the prompt(s) appear in THAT console and the
+            # secrets are written into its input buffer (focus-independent).
+            if not ConsoleInjector.inject_secrets(process.pid, secrets, timeout=inject_timeout):
+                return None
+
+        want_keepalive = keepalive if keepalive is not None else name.lower().startswith("login")
+        if want_keepalive:
+            # Once the login completes (after any manual/injected 2FA token),
+            # run the keepalive so the session and its tunnels don't expire.
+            # Runs in background: the shell prompt may take a while to appear.
             threading.Thread(
                 target=ConsoleInjector.run_command_at_shell_prompt,
                 args=(process.pid, SshLauncher.KEEPALIVE_COMMAND),
                 daemon=True,
             ).start()
 
-        return injected
+        return process.pid
+
+    @staticmethod
+    def launch_for_init(name: str, secrets: Sequence[str], register: bool = True) -> Optional[int]:
+        """
+        Launch `name` for the Init flow: hidden console, given secrets
+        injected, keepalive forced. Returns the PID on success, None on
+        failure. Login hosts pass [password, token]; DB targets pass
+        [password] and register=False so they stay invisible in the menu.
+        """
+        return SshLauncher._launch(
+            name, hidden=True, secrets=list(secrets),
+            register=register, keepalive=True,
+            inject_timeout=60.0 if len(secrets) > 1 else 30.0,
+        )
 
     @staticmethod
     def get_current_password() -> Optional[str]:

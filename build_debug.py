@@ -33,9 +33,9 @@ def install_dependencies():
     for dep in dependencies:
         try:
             subprocess.run([python_cmd, "-m", "pip", "install", dep], check=True, capture_output=True)
-            print(f"✓ {dep}")
+            print(f"[OK] {dep}")
         except subprocess.CalledProcessError:
-            print(f"✗ Failed to install {dep}")
+            print(f"[FAIL] Failed to install {dep}")
 
 def create_icon():
     """Create app icon"""
@@ -79,10 +79,15 @@ def build_debug_exe():
         "--hiddenimport", "ssh_connection.main",
         "--hiddenimport", "ssh_connection.gui.tray_icon_manager",
         "--hiddenimport", "ssh_connection.gui.win32_menu_bitmaps",
+        "--hiddenimport", "ssh_connection.gui.hotkey_manager",
+        "--hiddenimport", "ssh_connection.gui.search_dialog",
         "--hiddenimport", "ssh_connection.ssh.ssh_config_parser",
         "--hiddenimport", "ssh_connection.ssh.ssh_launcher",
         "--hiddenimport", "ssh_connection.ssh.console_injector",
         "--hiddenimport", "ssh_connection.ssh.connection_tracker",
+        "--hiddenimport", "ssh_connection.ssh.init_orchestrator",
+        "--hiddenimport", "tkinter",
+        "--hiddenimport", "tkinter.simpledialog",
         "--hiddenimport", "ssh_connection.config.config_loader",
         "--hiddenimport", "ssh_connection.security.crypto_util",
         "--icon", "resources/icon.ico",
@@ -95,16 +100,16 @@ def build_debug_exe():
     if result.returncode == 0:
         exe_path = Path("dist/SSH-Connection-Manager-DEBUG.exe")
         if exe_path.exists():
-            print(f"✓ Debug executable created: {exe_path}")
+            print(f"[OK] Debug executable created: {exe_path}")
             return exe_path
         else:
             # Look for any debug exe
             debug_files = list(Path("dist").glob("*DEBUG*.exe"))
             if debug_files:
-                print(f"✓ Debug executable created: {debug_files[0]}")
+                print(f"[OK] Debug executable created: {debug_files[0]}")
                 return debug_files[0]
     
-    print("✗ Build failed!")
+    print("[FAIL] Build failed!")
     return None
 
 def main():
@@ -124,7 +129,7 @@ def main():
             sys.exit(1)
         
         print("\n" + "=" * 50)
-        print("✓ Debug build completed!")
+        print("[OK] Debug build completed!")
         print(f"Executable: {exe_path}")
         print("- Shows console window with debug messages")
         print("- Creates log file in: %USERPROFILE%\\ssh_connection_debug.log")

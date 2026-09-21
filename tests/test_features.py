@@ -76,16 +76,23 @@ def test_dynamic_menu(monkey_config):
     check("TEST and PROD submenus present", "TEST" in labels and "PROD" in labels, str(labels))
     check("no Reboot entry", all(l != "Reboot" for l in labels if l), str(labels))
     check("Settings and Exit present", "Settings" in labels and "Exit" in labels)
+    # The label carries the accelerator hint after a tab ("Cerca host...	Ctrl+Shift+Space"):
+    # Windows right-aligns and greys whatever follows the tab.
+    from ssh_connection.gui.hotkey_manager import HotkeyManager
+    check("top-level Cerca host present",
+          f"Cerca host...	{HotkeyManager.SHORTCUT_LABEL}" in labels, str(labels))
 
     test_menu = next(i for i in items if i.text == "TEST")
     sub_labels = [mi.text for mi in test_menu.submenu.items]
-    check("TEST host labels are plain text", sub_labels[0] == "login_test", str(sub_labels))
+    check("Cerca... entry present", "Cerca..." in sub_labels, str(sub_labels))
+    check("TEST host labels are plain text", "login_test" in sub_labels, str(sub_labels))
 
     plan = {idx: (key, children) for idx, key, children in mgr._bitmap_plan}
     test_idx = next(i for i, it in enumerate(items) if it.text == "TEST")
     prod_idx = next(i for i, it in enumerate(items) if it.text == "PROD")
-    check("TEST plan uses circle bitmaps", all(k == "test_idle" for k in plan[test_idx][1]), str(plan))
-    check("PROD plan uses square bitmaps", all(k == "prod_idle" for k in plan[prod_idx][1]), str(plan))
+    # "Cerca..." carries no bitmap (None); the host rows carry circle/square bitmaps.
+    check("TEST plan uses circle bitmaps", all(k == "test_idle" for k in plan[test_idx][1] if k), str(plan))
+    check("PROD plan uses square bitmaps", all(k == "prod_idle" for k in plan[prod_idx][1] if k), str(plan))
 
     # Simulate an active connection and rebuild the menu
     import psutil
@@ -96,7 +103,7 @@ def test_dynamic_menu(monkey_config):
         test_menu = next(i for i in items if i.text.startswith("TEST"))
         plan = {idx: (key, children) for idx, key, children in mgr._bitmap_plan}
         test_idx = next(i for i, it in enumerate(items) if it.text.startswith("TEST"))
-        check("active TEST host gets green bitmap", plan[test_idx][1][0] == "test_active", str(plan))
+        check("active TEST host gets green bitmap", "test_active" in plan[test_idx][1], str(plan))
         check("TEST submenu title shows active count", test_menu.text == "TEST (1 attive)", test_menu.text)
         # Icon reflects active connections
         img = mgr.create_icon_image(1)

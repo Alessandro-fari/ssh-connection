@@ -11,6 +11,7 @@ from PIL import Image, ImageDraw
 from ..ssh.connection_tracker import tracker
 from ..ssh.ssh_config_parser import SshConfigParser
 from ..ssh.ssh_launcher import SshLauncher
+from .hotkey_manager import HotkeyManager
 
 
 class _GUITHREADINFO(ctypes.Structure):
@@ -57,6 +58,8 @@ class TrayIconManager:
         self._last_state = None  # (config_mtime, frozenset(active_hosts))
         self._bitmaps = None
         self._bitmap_plan = []  # [(top_index, key, [child_keys])]
+        self._hotkey = None
+        self._search_popup = None
         try:
             from .win32_menu_bitmaps import MenuBitmaps
             self._bitmaps = MenuBitmaps()
@@ -105,6 +108,9 @@ class TrayIconManager:
         def make_connect_callback(hostname):
             return lambda icon, item: self.connect_to_host(hostname)
 
+        def make_search_callback(env_name):
+            return lambda icon, item: self._open_search(env_name)
+
         plan = []
         items_out = []
 
@@ -115,6 +121,12 @@ class TrayIconManager:
             env = section.lower()
             child_keys = []
             items = []
+
+            # "Cerca..." entry at the top of the section submenu: opens the
+            # host search dialog pre-filtered to this environment.
+            items.append(pystray.MenuItem("Cerca...", make_search_callback(section)))
+            child_keys.append(None)  # no status bitmap for the search entry
+
             for host in hosts:
                 items.append(pystray.MenuItem(host, make_connect_callback(host)))
                 child_keys.append(f"{env}_active" if host in active else f"{env}_idle")
@@ -123,6 +135,18 @@ class TrayIconManager:
             plan.append((len(items_out), f"{env}_idle", child_keys))
             items_out.append(pystray.MenuItem(title, pystray.Menu(*items)))
 
+        items_out.append(pystray.Menu.SEPARATOR)
+        # A tab in a native menu string makes Windows right-align what
+        # follows and draw it as the accelerator hint (grey, like "Ctrl+C"
+        # in Explorer). pystray passes `text` straight to MENUITEMINFO
+        # .dwTypeData, so this needs no extra Win32 call and shows up as
+        # soon as the item is hovered/drawn.
+        items_out.append(pystray.MenuItem(
+            f"Cerca host...	{HotkeyManager.SHORTCUT_LABEL}",
+            self._open_search_top))
+        items_out.append(pystray.Menu.SEPARATOR)
+        items_out.append(pystray.MenuItem("Init TEST", self.run_init_test))
+        items_out.append(pystray.MenuItem("Init PROD", self.run_init_prod))
         items_out.append(pystray.Menu.SEPARATOR)
         items_out.append(pystray.MenuItem("Settings", self.open_settings))
         items_out.append(pystray.MenuItem("Exit", self.quit_application))
@@ -229,9 +253,100 @@ class TrayIconManager:
         print(f"Connecting to {host}...")
         SshLauncher.connect(host)
 
+    def run_init_test(self, icon: pystray.Icon, item) -> None:
+        """Init TEST: open login_test + its hidden DB hosts from a 2FA token."""
+        self._run_init("TEST")
+
+    def run_init_prod(self, icon: pystray.Icon, item) -> None:
+        """Init PROD: open login_prod + its hidden DB hosts from a 2FA token."""
+        self._run_init("PROD")
+
+    def _run_init(self, env: str) -> None:
+        logging.info(f"Init {env} menu item clicked")
+        try:
+            from ..ssh.init_orchestrator import InitOrchestrator
+            InitOrchestrator.start(env, notify=self._notify)
+        except Exception as e:
+            logging.error(f"run_init {env} failed: {e}", exc_info=True)
+
+    def _notify(self, title: str, message: str) -> None:
+        """Show a tray balloon notification (best-effort)."""
+        try:
+            if self.icon:
+                self.icon.notify(message, title)
+        except Exception as e:
+            logging.debug(f"Tray notification failed: {e}")
+
+    # ------------------------------------------------------------------
+    # Host search (dialog + global hotkey)
+
+    def _search_hosts(self):
+        """Host list for the popup: re-read at every open so config edits
+        made while the app is running are picked up."""
+        host_map = SshConfigParser.parse_ssh_config()
+        return [(sec, host_map.get(sec, [])) for sec in ("TEST", "PROD")]
+
+    def _on_search_selected(self, host: str) -> None:
+        """Called on the popup thread when the user confirms a host.
+
+        connect_to_host blocks (it spawns ssh and injects the console), so
+        it must not run on the popup's Tk thread: offload it, otherwise the
+        popup would stay frozen on screen until the terminal is up.
+        """
+        threading.Thread(target=self.connect_to_host, args=(host,),
+                         daemon=True).start()
+
+    def _ensure_search_popup(self):
+        """Create (and pre-warm) the search popup on first use."""
+        if self._search_popup is None:
+            from .search_dialog import SearchPopup
+            self._search_popup = SearchPopup(
+                host_provider=self._search_hosts,
+                on_select=self._on_search_selected)
+            self._search_popup.start()
+        return self._search_popup
+
+    def _open_search(self, initial_env) -> None:
+        """Show the host search popup.
+
+        `initial_env` is 'TEST'/'PROD' to pre-filter (from a section
+        submenu) or None to use the saved preference (from the global
+        hotkey). The popup is pre-warmed at startup, so this call only
+        posts a request to its thread and returns immediately — the tray
+        menu never blocks and the window appears instantly.
+        """
+        try:
+            self._ensure_search_popup().show(initial_env)
+        except Exception as e:
+            logging.error(f"Opening search popup failed: {e}", exc_info=True)
+
+    def _open_search_top(self, icon=None, item=None) -> None:
+        """Top-level 'Cerca host...' menu entry — same as the global hotkey,
+        uses the saved environment preference (no forced env)."""
+        self._open_search(None)
+
+    def _on_global_hotkey(self) -> None:
+        """Called on the hotkey thread when Ctrl+Shift+Space is pressed.
+
+        Opens the search dialog using the saved environment preference.
+        """
+        logging.info("Global hotkey (Ctrl+Shift+Space) pressed")
+        self._open_search(None)
+
     def quit_application(self, icon: pystray.Icon, item) -> None:
         """Quit the application"""
         print("Quitting application...")
+        # Stop the global hotkey listener.
+        if self._hotkey:
+            self._hotkey.stop()
+        if self._search_popup:
+            self._search_popup.stop()
+        # Hidden Init consoles have no window the user can close: kill them.
+        try:
+            from ..ssh.init_orchestrator import InitOrchestrator
+            InitOrchestrator.shutdown()
+        except Exception as e:
+            logging.debug(f"Init shutdown failed: {e}")
         self._stop_event.set()
         icon.stop()
 
@@ -257,6 +372,18 @@ class TrayIconManager:
 
             refresher = threading.Thread(target=self._refresh_loop, daemon=True)
             refresher.start()
+
+            # Build the search popup now (hidden): constructing the Tk
+            # interpreter costs ~200 ms, and doing it here means the first
+            # Ctrl+Shift+Space is as instant as every following one.
+            try:
+                self._ensure_search_popup()
+            except Exception as e:
+                logging.warning(f"Search popup pre-warm failed: {e}")
+
+            # Global hotkey (Ctrl+Shift+Space) opens the host search popup.
+            self._hotkey = HotkeyManager(on_triggered=self._on_global_hotkey)
+            self._hotkey.start()
 
             # Run the tray icon (this blocks)
             self.icon.run()
@@ -286,6 +413,10 @@ class TrayIconManager:
 
     def stop(self) -> None:
         """Stop the tray icon"""
+        if self._hotkey:
+            self._hotkey.stop()
+        if self._search_popup:
+            self._search_popup.stop()
         self._stop_event.set()
         if self.icon:
             self.icon.stop()
