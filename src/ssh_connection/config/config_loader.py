@@ -24,8 +24,63 @@ class MavenCredentials:
     password: str
 
 
+_MAVEN_NS = "http://maven.apache.org/SETTINGS/1.1.0"
+
+# Written by ensure_maven_settings() when ~/.m2/settings.xml does not exist.
+# Only the FIRST <server> is read (username + password for every SSH login).
+_MAVEN_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
+<settings xmlns="http://maven.apache.org/SETTINGS/1.1.0"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.1.0 https://maven.apache.org/xsd/settings-1.1.0.xsd">
+  <!--
+    SSH Connection Manager legge nome utente e password dal PRIMO <server>.
+    Il prefisso di dominio (es. DOMINIO\\nome.cognome) viene tolto dal nome utente.
+    Le modifiche valgono dalla prossima connessione, senza riavviare l'app.
+  -->
+  <servers>
+    <server>
+      <id>ssh-connection</id>
+      <username>INSERISCI_UTENTE</username>
+      <password>INSERISCI_PASSWORD</password>
+    </server>
+  </servers>
+</settings>
+"""
+
+
 class ConfigLoader:
     """Loader for application configuration from YAML files and Maven settings"""
+
+    @staticmethod
+    def maven_settings_path() -> Path:
+        """File holding the SSH username/password (Maven settings.xml)."""
+        return Path.home() / ".m2" / "settings.xml"
+
+    @staticmethod
+    def ensure_maven_settings() -> bool:
+        """Create ~/.m2/settings.xml from a template if it does not exist.
+        Returns True if the file was created now. An existing file is never
+        touched: it may also be the user's real Maven configuration."""
+        path = ConfigLoader.maven_settings_path()
+        if path.exists():
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_MAVEN_TEMPLATE, encoding="utf-8")
+        return True
+
+    @staticmethod
+    def _find(elem, path: str):
+        """find() with and without the Maven namespace.
+
+        Explicit `is not None`: an Element with no children is falsy, so the
+        previous `a.find(x) or a.find(ns_x)` discarded a found <id>/<username>
+        in a settings.xml without namespace and returned no credentials."""
+        found = elem.find(path)
+        if found is None:
+            # './/servers' -> './/m:servers', 'id' -> 'm:id'
+            ns_path = f".//m:{path[3:]}" if path.startswith(".//") else f"m:{path}"
+            found = elem.find(ns_path, {"m": _MAVEN_NS})
+        return found
     
     def __init__(self, encrypted_user: Optional[str], connections: List[Dict[str, Any]], maven_credentials: Optional[MavenCredentials] = None):
         self.encrypted_user = encrypted_user
@@ -51,9 +106,7 @@ class ConfigLoader:
             MavenCredentials if found, None otherwise
         """
         if maven_settings_path is None:
-            # Default Maven settings location
-            home_dir = Path.home()
-            maven_settings_path = home_dir / ".m2" / "settings.xml"
+            maven_settings_path = ConfigLoader.maven_settings_path()
         
         if not maven_settings_path.exists():
             return None
@@ -62,25 +115,26 @@ class ConfigLoader:
             tree = ET.parse(maven_settings_path)
             root = tree.getroot()
             
-            # Maven XML namespace
-            ns = {'maven': 'http://maven.apache.org/SETTINGS/1.1.0'}
-            
-            # Try to find servers section - handle both with and without namespace
-            servers = root.find('.//servers') or root.find('.//maven:servers', ns)
+            # Handles settings.xml both with and without the Maven namespace.
+            servers = ConfigLoader._find(root, './/servers')
             if servers is None:
                 return None
-            
+
             # Get first server (assuming single server configuration)
-            server = servers.find('.//server') or servers.find('.//maven:server', ns)
+            server = ConfigLoader._find(servers, './/server')
             if server is None:
                 return None
-            
-            # Extract server details
-            server_id_elem = server.find('id') or server.find('maven:id', ns)
-            username_elem = server.find('username') or server.find('maven:username', ns)
-            password_elem = server.find('password') or server.find('maven:password', ns)
-            
-            if server_id_elem is not None and username_elem is not None and password_elem is not None:
+
+            server_id_elem = ConfigLoader._find(server, 'id')
+            username_elem = ConfigLoader._find(server, 'username')
+            password_elem = ConfigLoader._find(server, 'password')
+
+            if (server_id_elem is not None and username_elem is not None and password_elem is not None
+                    and server_id_elem.text and username_elem.text and password_elem.text
+                    # Template not filled in yet: no credentials rather than
+                    # typing "INSERISCI_PASSWORD" into every login.
+                    and not username_elem.text.strip().startswith("INSERISCI_")
+                    and not password_elem.text.strip().startswith("INSERISCI_")):
                 return MavenCredentials(
                     server_id=server_id_elem.text.strip(),
                     username=username_elem.text.strip(),

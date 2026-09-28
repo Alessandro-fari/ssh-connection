@@ -302,6 +302,10 @@ Va ri-applicato a ogni tick perché `update_menu()` ricrea l'handle del menu.
 - **Credenziali**: preferisce `~/.m2/settings.xml` (primo `<server>`: username e
   password); in alternativa `encryptedUser` nel YAML, decifrato con `CryptoUtil`.
   Il prefisso dominio (`netsgroup\`) viene rimosso dallo username.
+- `maven_settings_path()` / `ensure_maven_settings()`: il dialog Impostazioni (scheda Info,
+  "Apri utente e password") apre il file e, se manca, lo crea da un modello. I segnaposto
+  `INSERISCI_*` non compilati equivalgono a credenziali assenti. `_find()` cerca con e senza
+  namespace Maven (confronto `is not None`: un `Element` senza figli è falsy).
 
 ### `security/crypto_util.py` — cifratura
 AES-128 ECB con chiave derivata da `%COMPUTERNAME%` (primi 16 caratteri, padded),

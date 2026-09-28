@@ -26,6 +26,23 @@ annotati nella voce stessa. Formato ispirato a [Keep a Changelog](https://keepac
     la ricerca pre-filtrata, che l'hotkey globale non fa.
 
 ### Modificato
+- **2026-09-28** — **"Apri utente e password" nella scheda Info** delle Impostazioni.
+  Apre in Blocco note `~/.m2/settings.xml`, da cui l'app legge nome utente e password
+  (primo `<server>`). Se il file non esiste lo crea da un modello con i segnaposto
+  `INSERISCI_UTENTE` / `INSERISCI_PASSWORD` e spiega cosa compilare. Un file esistente
+  non viene mai toccato, perché può essere anche la vera configurazione Maven. Le
+  modifiche valgono dalla prossima connessione: `ConfigLoader.load()` rilegge il file
+  a ogni lancio.
+  - I segnaposto non compilati sono trattati come "credenziali assenti", così non
+    vengono mai digitati come password in un login.
+  - **Fix** in `ConfigLoader._load_maven_credentials`: `a.find(x) or a.find(ns_x)`
+    scartava gli elementi trovati, perché un `Element` senza figli è *falsy*. Un
+    `settings.xml` **senza namespace** Maven quindi non forniva credenziali. Ora c'è
+    `_find()` con `is not None`. Il file reale con namespace funzionava già e
+    continua a funzionare (verificato).
+- **2026-09-28** — **Rimossi dal repository i file `__pycache__`/`*.pyc`** (17 file
+  tracciati per errore) e aggiunti al `.gitignore`. Sono bytecode rigenerato a ogni
+  esecuzione: comparivano sempre come modifiche non committate. I file restano su disco.
 - **2026-09-28** — **Dialog Impostazioni: preferiti e scorciatoia più chiari** (feedback
   d'uso).
   - *Preferiti*: la lista a selezione multipla non si capiva. Ora in alto ci sono tutti

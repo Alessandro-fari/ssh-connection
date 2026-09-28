@@ -30,6 +30,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from ..config import autostart
 from ..config.app_settings import DEFAULTS, LIMITS, NOTIFICATION_KINDS, AppSettings
+from ..config.config_loader import ConfigLoader
 from .hotkey_manager import KEYS, MODIFIERS, parse_binding
 from .search_dialog import (_C_BG, _C_HEADER, _C_MUTED, _C_SEL_BG, _C_SEL_FG,
                             _C_TEXT, _force_foreground)
@@ -247,15 +248,21 @@ class SettingsDialog:
         tk.Label(i, text=f"SSH Connection Manager  v{self._version}",
                  bg=_C_BG, fg=_C_TEXT, font=("Segoe UI", 11, "bold")).pack(anchor="w")
         for title, path in (("Config SSH", self._ssh_config_path),
+                            ("Utente e password", ConfigLoader.maven_settings_path()),
                             ("Preferenze", AppSettings.path),
                             ("Log", LOG_FILE)):
             tk.Label(i, text=f"{title}:  {path}", **hint).pack(anchor="w", pady=(6, 0))
         links = tk.Frame(i, bg=_C_BG)
         links.pack(anchor="w", pady=(12, 0))
+        tk.Button(links, text="Apri utente e password", command=self._open_credentials,
+                  **btn).pack(side="left")
         tk.Button(links, text="Apri config SSH",
-                  command=lambda: self._open(self._ssh_config_path), **btn).pack(side="left")
+                  command=lambda: self._open(self._ssh_config_path), **btn).pack(side="left", padx=8)
         tk.Button(links, text="Apri log", command=lambda: self._open(LOG_FILE),
-                  **btn).pack(side="left", padx=8)
+                  **btn).pack(side="left")
+        self._var_info = tk.StringVar()
+        tk.Label(i, textvariable=self._var_info, justify="left", wraplength=420,
+                 **hint).pack(anchor="w", pady=(10, 0))
 
         # --- footer -----------------------------------------------------
         self._var_error = tk.StringVar()
@@ -297,6 +304,9 @@ class SettingsDialog:
         self._refresh_favorites()
         self._var_recents.set(f"Recenti: {len(cfg['recents'])}")
         self._var_error.set("")
+        creds = ConfigLoader.maven_settings_path()
+        self._var_info.set("" if creds.exists() else
+                           f"{creds} non esiste: 'Apri utente e password' lo crea da un modello.")
 
     def _do_show(self) -> None:
         self._build()
@@ -462,6 +472,30 @@ class SettingsDialog:
     def _clear_recents(self) -> None:
         AppSettings.update(recents=[])
         self._var_recents.set("Recenti: 0")
+
+    def _open_credentials(self) -> None:
+        """Open ~/.m2/settings.xml (username/password of every SSH login),
+        creating it from a template first if it does not exist."""
+        path = ConfigLoader.maven_settings_path()
+        try:
+            created = ConfigLoader.ensure_maven_settings()
+        except OSError as e:
+            logging.error(f"Cannot create {path}: {e}")
+            self._var_info.set(f"Impossibile creare {path}: {e}")
+            return
+        if created:
+            self._var_info.set(
+                f"Creato {path}: sostituisci INSERISCI_UTENTE e INSERISCI_PASSWORD e salva. "
+                f"Vale dalla prossima connessione, senza riavviare.")
+        else:
+            self._var_info.set("Le credenziali sono lette dal primo <server> del file. "
+                               "Le modifiche valgono dalla prossima connessione.")
+        # Notepad, not the default .xml handler (often a browser, read-only).
+        try:
+            import subprocess
+            subprocess.Popen(["notepad.exe", str(path)], stdin=subprocess.DEVNULL)
+        except OSError:
+            self._open(path)
 
     @staticmethod
     def _open(path: Path) -> None:

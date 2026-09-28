@@ -463,6 +463,53 @@ def test_autostart_describe():
           "run.py" in autostart._command() and autostart.AUTOSTART_FLAG in autostart._command())
 
 
+def test_credentials_file():
+    print("\n[9] Credentials file (~/.m2/settings.xml) create + open")
+    from ssh_connection.config.config_loader import ConfigLoader
+    creds = TMP / "m2" / "settings.xml"
+    real_path = ConfigLoader.maven_settings_path
+    ConfigLoader.maven_settings_path = staticmethod(lambda: creds)
+    try:
+        check("created from template when missing", ConfigLoader.ensure_maven_settings() and creds.exists())
+        check("template placeholders are not used as credentials",
+              ConfigLoader._load_maven_credentials(creds) is None)
+        creds.write_text(creds.read_text(encoding="utf-8")
+                         .replace("INSERISCI_UTENTE", "DOM" + chr(92) + "mario.rossi")
+                         .replace("INSERISCI_PASSWORD", "segreta"), encoding="utf-8")
+        check("existing file never overwritten", ConfigLoader.ensure_maven_settings() is False
+              and "segreta" in creds.read_text(encoding="utf-8"))
+        c = ConfigLoader._load_maven_credentials(creds)
+        check("filled template is read", c is not None and c.password == "segreta")
+        plain = TMP / "plain.xml"
+        plain.write_text("<settings><servers><server><id>a</id><username>u</username>"
+                         "<password>p</password></server></servers></settings>", encoding="utf-8")
+        c = ConfigLoader._load_maven_credentials(plain)
+        check("settings.xml without namespace is read (old falsy-Element bug)",
+              c is not None and (c.username, c.password) == ("u", "p"))
+
+        # Dialog button: creates the file if needed and opens it in Notepad.
+        import subprocess
+        from ssh_connection.gui.settings_dialog import SettingsDialog
+        opened = []
+        real_popen = subprocess.Popen
+        subprocess.Popen = lambda args, **kw: opened.append(args)
+        creds.unlink()
+
+        class _Var:
+            def set(self, v): self.v = v
+        dlg = SettingsDialog.__new__(SettingsDialog)
+        dlg._var_info = _Var()
+        try:
+            dlg._open_credentials()
+        finally:
+            subprocess.Popen = real_popen
+        check("button creates the missing file", creds.exists())
+        check("button opens it in Notepad", opened == [["notepad.exe", str(creds)]], str(opened))
+        check("button explains what to fill in", "INSERISCI_UTENTE" in dlg._var_info.v, dlg._var_info.v)
+    finally:
+        ConfigLoader.maven_settings_path = real_path
+
+
 def main():
     AppSettings.path = TMP / "prefs.json"
     SshConfigParser.get_config_path = staticmethod(lambda: EXAMPLE_CONFIG)
@@ -478,6 +525,7 @@ def main():
         test_monitor_tunnels()
         test_keepalive_failed()
         test_autostart_describe()
+        test_credentials_file()
     finally:
         ct.SSH_PROCESS_NAMES.clear()
         ct.SSH_PROCESS_NAMES.add("ssh.exe")

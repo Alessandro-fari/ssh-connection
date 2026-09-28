@@ -169,6 +169,8 @@ The application supports multiple credential sources:
 
 #### 1. Maven Settings (Recommended)
 
+Tip: *Impostazioni... → Info → "Apri utente e password"* opens this file in Notepad and creates it from a template if it does not exist yet.
+
 Place your credentials in `~/.m2/settings.xml`:
 
 ```xml
