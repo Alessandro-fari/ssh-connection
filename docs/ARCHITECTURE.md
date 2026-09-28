@@ -113,7 +113,19 @@ token 2FA, apre un ambiente. Config in costante `INIT_ENVS = {TEST: {login, targ
 - **Deadlock evitato**: `_lock` è un `RLock` — `start()` lo tiene e chiama `_live_procs()`
   che lo riacquisisce; con un `Lock` semplice si bloccava il thread principale della tray.
 - `InitOrchestrator` tiene la lista dei PID spawnati per terminarli all'uscita dell'app
-  (`shutdown()` da `quit_application`), dato che le console nascoste non hanno finestra.
+  (`shutdown()` da `quit_application`, con `kill_console` che uccide anche `ssh.exe`),
+  dato che le console nascoste non hanno finestra.
+- **Login fallito e retry**: la console è `powershell -NoExit` e sopravvive a ssh. Per
+  questo:
+  - il riuso del login usa `tracker.session_alive()`, che richiede un `ssh.exe` figlio
+    vivo;
+  - dopo l'iniezione `_await_login()` attende la conferma (porta tunnel aperta o prompt
+    shell), fallendo su `ConsoleInjector.FAILURE_MARKERS`, sull'uscita di ssh o dopo 45 s;
+  - in caso di fallimento la console viene uccisa e deregistrata (`SshLauncher.discard`)
+    e la notifica invita a riprovare;
+  - `_discard_stale()` ripulisce le console nascoste rimaste prima di un nuovo login;
+  - `_alive_sessions()` fa sì che un retry riapra solo i target mancanti o morti.
+  - `_launch(hidden=True)` scarta da sé la console quando l'iniezione fallisce.
 
 ### `ssh/console_injector.py` — iniezione mirata nella console (Win32)
 Il componente più delicato. Scrive il testo **direttamente nel buffer di input della
@@ -137,6 +149,30 @@ finisce solo in quel terminale, indipendentemente dal focus:
   sessioni ssh. Una connessione è attiva finché il processo è vivo (psutil).
 - Il `create_time` protegge dal riuso dei PID. Istanza condivisa `tracker` usata da
   launcher e tray.
+- `session_alive(host)`/`ssh_child_alive(pid)`: più stretti di `is_active`, perché
+  richiedono il processo ssh vivo sotto la console. Il nome è in `SSH_PROCESS_NAMES`
+  (i test lo puntano a un binario di sistema eseguito sul posto, mai copiato o
+  rinominato).
+- `kill_console(pid)` uccide console + ssh e li marca con `expect_exit`, così il
+  monitor non li segnala come chiusure inattese.
+
+### `ssh/session_monitor.py` — notifiche sulle sessioni
+Thread `SessionMonitor` (tick 3 s) avviato/fermato dalla tray. Sorgenti: le console
+del tracker e quelle nascoste di Init (`InitOrchestrator.hidden_entries`).
+- **Connessione chiusa**: tiene un handle `OpenProcess(SYNCHRONIZE)` su ogni ssh per
+  leggerne l'exit code. Visibile → notifica solo su 255 con console ancora aperta;
+  nascosta → sempre, e uccide la console orfana; ignora le uscite attese e gli host
+  di un Init in corso (`busy_hosts`).
+- **Tunnel perso** (ogni 10 s): porte LocalForward da `ssh -G host` (cache per
+  mtime del config) confrontate con le porte in LISTEN di qualsiasi ssh
+  (`psutil.net_connections`, nessuna connessione aperta). Notifica su perdita o su
+  mancato bind dopo 30 s di grace; una sola volta finché non si ripristina.
+- Il keepalive fallito è segnalato da `SshLauncher._run_keepalive` (evento puntuale).
+
+### `notifications.py` — sink delle notifiche
+`notify(kind, title, msg)` usabile da qualsiasi modulo senza dipendere da pystray;
+la tray installa il balloon con `set_sink()`. Filtra per tipo secondo
+`AppSettings` (`init`, `connection_lost`, `tunnel_lost`, `keepalive_failed`).
 
 ### `gui/tray_icon_manager.py` — interfaccia tray
 - Icona pystray: blu quando idle, verde con badge contatore quando ci sono connessioni.
@@ -166,9 +202,21 @@ finisce solo in quel terminale, indipendentemente dal focus:
   (rilevato via `GetGUIThreadInfo`, per evitare flicker).
 - Linguaggio visivo: TEST = cerchi (bianco freddo idle / verde connesso),
   PROD = quadrati (ambra idle / verde connesso).
+- **Preferiti/Recenti** in cima: intestazione disabilitata "Preferiti" + host con
+  bitmap di stato (voci di primo livello nel `_bitmap_plan` con `children=None`),
+  poi il sottomenu "Recenti". `connect_to_host` registra il recente. Lo stato del
+  refresh loop include l'mtime del file preferenze.
+- **Impostazioni**: `_ensure_settings_dialog` crea il `SettingsDialog` sul thread Tk
+  del popup (pre-warm in `init_tray`). `_apply_settings` applica rebind della
+  hotkey, avvio automatico e salva in `AppSettings`, restituendo un messaggio
+  d'errore al dialog se qualcosa fallisce.
 
 ### `gui/hotkey_manager.py` — hotkey globale (Win32)
-Registra **Ctrl+Shift+Space** come hotkey globale e notifica la tray quando
+Binding configurabile (default **Ctrl+Shift+Space**): `parse_binding` /
+`format_binding` convertono stringhe tipo `"Ctrl+Alt+K"` (almeno un modificatore,
+eccetto i tasti F). `start()` restituisce se la registrazione è riuscita;
+`rebind()` ripristina il binding precedente se il nuovo è occupato.
+Registra la hotkey globale e notifica la tray quando
 viene premuto. pystray possiede il message loop della tray sul thread principale
 e non espone hook, quindi l'hotkey gira su un **thread dedicato** con il suo
 message loop Win32 (`GetMessage`):
@@ -220,6 +268,27 @@ delle righe diversamente dal previsto (il dialog di fatto non funzionava).
   `_env_touched` è alzato solo da `<<ComboboxSelected>>`.
 - **Smoke test manuale**: `py -m ssh_connection.gui.search_dialog` apre il
   popup con una lista host fittizia.
+
+### `gui/settings_dialog.py` — dialog Impostazioni
+`Toplevel` dello stesso root Tk del `SearchPopup`: tutte le chiamate passano da
+`SearchPopup.run_on_ui(fn)`, che mette `fn` sulla coda del thread Tk. Schede
+Generale / Notifiche / Preferiti / Info. La scorciatoia si cattura da un campo
+(`binding_from_keys` usa il VK di `event.keycode`, indipendente dal layout) e,
+mentre il campo ha il focus, l'hotkey globale è sospesa tramite il callback
+`hotkey_suspend`. I preferiti si modificano su una copia di lavoro (Aggiungi /
+Rimuovi / Su / Giù) salvata con "Salva". `collect()` valida e restituisce i valori;
+`on_save` (tray) può rifiutarli con un messaggio mostrato nel dialog.
+
+### `config/app_settings.py` e `config/autostart.py`
+- `AppSettings`: preferenze utente in `~/.ssh_connection_prefs.json` (`search_env`,
+  `hotkey`, `keepalive_interval`, `tunnel_timeout`, `notifications`, `favorites`,
+  `recents`), con valori sanificati e limitati, lock e scrittura atomica.
+  `SshLauncher.keepalive_command()`/`tunnel_wait_seconds()` le leggono al momento
+  dell'uso.
+- `autostart`: voce `HKCU\...\Run` con `--autostart`; considera anche il
+  collegamento nella cartella Esecuzione automatica creato dagli script di build.
+  `describe()` alimenta la riga informativa del dialog; `refresh_path()` (all'avvio)
+  riallinea la voce `Run` se punta a un exe che non esiste più.
 
 ### `gui/win32_menu_bitmaps.py` — icone colorate nel menu
 Windows disegna il testo dei menu (emoji incluse) in monocromia, quindi i pallini di

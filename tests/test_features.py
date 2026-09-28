@@ -67,6 +67,81 @@ def test_connection_tracker():
     check("active_hosts pruned", t.active_hosts() == set())
 
 
+def _fake_ssh_console():
+    """A PowerShell (like our terminals) whose child plays the ssh session:
+    ping.exe run in place from System32, matched through
+    connection_tracker.SSH_PROCESS_NAMES. Never copy/rename a system exe to
+    ssh.exe: antivirus flags that as masquerading."""
+    import os
+    from ssh_connection.ssh import connection_tracker as ct
+    ct.SSH_PROCESS_NAMES.clear()
+    ct.SSH_PROCESS_NAMES.add("ping.exe")
+    ping = Path(os.environ["SystemRoot"]) / "System32" / "PING.EXE"
+    return subprocess.Popen(
+        ['powershell', '-NoExit', '-Command', f"& '{ping}' -n 30 127.0.0.1 | Out-Null"],
+        creationflags=subprocess.CREATE_NO_WINDOW)
+
+
+def test_init_failure_recovery():
+    print("\n[3b] Init: failed login does not block a retry")
+    from ssh_connection.ssh import connection_tracker as ct
+    from ssh_connection.ssh import init_orchestrator as io
+    from ssh_connection.ssh.init_orchestrator import InitOrchestrator
+
+    check("failure marker: wrong token", ConsoleInjector.failure_in(
+        "Access denied\nPassword:") == "access denied")
+    check("failure marker: VPN down", ConsoleInjector.failure_in(
+        "ssh: connect to host x port 22: Connection timed out") == "connection timed out")
+    check("no failure marker in a normal prompt",
+          ConsoleInjector.failure_in("Enter PASSCODE:") == "")
+
+    if True:
+        proc = _fake_ssh_console()
+        try:
+            deadline = time.time() + 10
+            while time.time() < deadline and not ct.ssh_child_alive(proc.pid):
+                time.sleep(0.2)
+            check("ssh child detected under the console", ct.ssh_child_alive(proc.pid))
+            t = ConnectionTracker()
+            t.register("login_x", proc.pid)
+            check("session_alive while ssh runs", t.session_alive("login_x"))
+            for c in __import__("psutil").Process(proc.pid).children(recursive=True):
+                c.kill()
+            time.sleep(0.5)
+            check("console outlives ssh (-NoExit): still is_active", t.is_active("login_x"))
+            check("...but session_alive is False", not t.session_alive("login_x"))
+            ct.kill_console(proc.pid)
+            proc.wait(timeout=5)
+            check("kill_console terminates the console", proc.poll() is not None)
+        finally:
+            ct.kill_console(proc.pid)
+            ct.SSH_PROCESS_NAMES.clear()
+            ct.SSH_PROCESS_NAMES.add("ssh.exe")
+
+    # Full _run with a failing login, then a retry: the env must be
+    # re-runnable and nothing must stay registered as active.
+    notes = []
+    real = (InitOrchestrator._ask_token, SshLauncher.launch_for_init, io.ConfigLoader.load)
+    class _Cfg:
+        def get_password(self): return "pw"
+    try:
+        InitOrchestrator._ask_token = staticmethod(lambda env: "123456")
+        io.ConfigLoader.load = staticmethod(lambda: _Cfg())
+        SshLauncher.launch_for_init = staticmethod(lambda *a, **k: None)
+        tracker.register("login_test", subprocess.Popen(
+            ['powershell', '-Command', 'Start-Sleep 20'],
+            creationflags=subprocess.CREATE_NO_WINDOW).pid)  # stale: no ssh
+        InitOrchestrator._run("TEST", lambda t, m: notes.append(t))
+        check("failed login notified", notes and "fallito" in notes[-1], str(notes))
+        check("env no longer running after failure", "TEST" not in InitOrchestrator._running)
+        check("stale login console forgotten", not tracker.is_active("login_test"))
+        InitOrchestrator._run("TEST", lambda t, m: notes.append(t))
+        check("retry actually attempts the login again", len(notes) == 2, str(notes))
+    finally:
+        InitOrchestrator._ask_token, SshLauncher.launch_for_init, io.ConfigLoader.load = real
+        tracker._connections.clear()
+
+
 def test_dynamic_menu(monkey_config):
     print("\n[4] Dynamic tray menu")
     from ssh_connection.gui.tray_icon_manager import TrayIconManager
@@ -75,7 +150,7 @@ def test_dynamic_menu(monkey_config):
     labels = [getattr(i, 'text', None) for i in items]
     check("TEST and PROD submenus present", "TEST" in labels and "PROD" in labels, str(labels))
     check("no Reboot entry", all(l != "Reboot" for l in labels if l), str(labels))
-    check("Settings and Exit present", "Settings" in labels and "Exit" in labels)
+    check("Settings and Exit present", "Impostazioni..." in labels and "Exit" in labels)
     # The label carries the accelerator hint after a tab ("Cerca host...	Ctrl+Shift+Space"):
     # Windows right-aligns and greys whatever follows the tab.
     from ssh_connection.gui.hotkey_manager import HotkeyManager
@@ -182,6 +257,9 @@ def test_console_injection():
 
 
 def main():
+    # Never read/write the user's real preferences (favorites, hotkey...).
+    from ssh_connection.config.app_settings import AppSettings
+    AppSettings.path = Path(tempfile.mkdtemp(prefix="sshcm-test-")) / "prefs.json"
     # Point the parser (and everything built on it) at the example config
     SshConfigParser.get_config_path = staticmethod(lambda: EXAMPLE_CONFIG)
     real_parse = SshConfigParser.parse_ssh_config
@@ -191,6 +269,7 @@ def main():
     test_parser_sections()
     test_jump_host_resolution(None)
     test_connection_tracker()
+    test_init_failure_recovery()
     test_dynamic_menu(None)
     test_menu_bitmaps()
     test_console_injection()

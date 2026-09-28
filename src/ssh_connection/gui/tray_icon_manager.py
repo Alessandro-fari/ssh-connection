@@ -8,6 +8,10 @@ from pathlib import Path
 import pystray
 from PIL import Image, ImageDraw
 
+from .. import notifications
+from ..__version__ import __version__
+from ..config import autostart
+from ..config.app_settings import AppSettings
 from ..ssh.connection_tracker import tracker
 from ..ssh.ssh_config_parser import SshConfigParser
 from ..ssh.ssh_launcher import SshLauncher
@@ -47,6 +51,9 @@ class TrayIconManager:
       PROD  → squares:  warm-amber (idle) / solid green (connected)
     Shape encodes the environment, fill/color encodes the live connection —
     so similarly named test/prod machines are hard to confuse.
+
+    Top of the menu: the user's favorites (directly clickable, same status
+    bitmaps) and a "Recenti" submenu with the last hosts connected to.
     """
 
     REFRESH_SECONDS = 2.0
@@ -60,6 +67,8 @@ class TrayIconManager:
         self._bitmap_plan = []  # [(top_index, key, [child_keys])]
         self._hotkey = None
         self._search_popup = None
+        self._settings_dialog = None
+        self._monitor = None
         try:
             from .win32_menu_bitmaps import MenuBitmaps
             self._bitmaps = MenuBitmaps()
@@ -114,6 +123,28 @@ class TrayIconManager:
         plan = []
         items_out = []
 
+        env_of = {h: sec.lower() for sec in ("TEST", "PROD") for h in self.host_map.get(sec, [])}
+
+        def status_key(host):
+            env = env_of.get(host)
+            return f"{env}_active" if host in active else f"{env}_idle"
+
+        # Quick access: favorites directly at the top, then recents in a
+        # submenu. Hosts no longer in ~/.ssh/config are skipped.
+        favorites = [h for h in AppSettings.favorites() if h in env_of]
+        if favorites:
+            items_out.append(pystray.MenuItem("Preferiti", None, enabled=False))
+            for host in favorites:
+                plan.append((len(items_out), status_key(host), None))
+                items_out.append(pystray.MenuItem(host, make_connect_callback(host)))
+        recents = [h for h in AppSettings.recents() if h in env_of]
+        if recents:
+            plan.append((len(items_out), None, [status_key(h) for h in recents]))
+            items_out.append(pystray.MenuItem("Recenti", pystray.Menu(
+                *[pystray.MenuItem(h, make_connect_callback(h)) for h in recents])))
+        if favorites or recents:
+            items_out.append(pystray.Menu.SEPARATOR)
+
         for section in ("TEST", "PROD"):
             hosts = self.host_map.get(section)
             if not hosts:
@@ -142,17 +173,22 @@ class TrayIconManager:
         # .dwTypeData, so this needs no extra Win32 call and shows up as
         # soon as the item is hovered/drawn.
         items_out.append(pystray.MenuItem(
-            f"Cerca host...	{HotkeyManager.SHORTCUT_LABEL}",
+            f"Cerca host...	{self._hotkey_label()}",
             self._open_search_top))
         items_out.append(pystray.Menu.SEPARATOR)
         items_out.append(pystray.MenuItem("Init TEST", self.run_init_test))
         items_out.append(pystray.MenuItem("Init PROD", self.run_init_prod))
         items_out.append(pystray.Menu.SEPARATOR)
-        items_out.append(pystray.MenuItem("Settings", self.open_settings))
+        items_out.append(pystray.MenuItem("Impostazioni...", self.open_settings))
         items_out.append(pystray.MenuItem("Exit", self.quit_application))
 
         self._bitmap_plan = plan
         yield from items_out
+
+    def _hotkey_label(self) -> str:
+        if self._hotkey is not None:
+            return self._hotkey.binding
+        return AppSettings.get("hotkey")
 
     def _decorate_menu(self) -> None:
         """Apply the colored status bitmaps to pystray's native HMENU."""
@@ -178,7 +214,12 @@ class TrayIconManager:
             mtime = SshConfigParser.get_config_path().stat().st_mtime
         except OSError:
             mtime = None
-        return (mtime, frozenset(tracker.active_hosts()))
+        try:
+            # Favorites/recents/hotkey live in the prefs file.
+            prefs_mtime = AppSettings.path.stat().st_mtime
+        except OSError:
+            prefs_mtime = None
+        return (mtime, prefs_mtime, frozenset(tracker.active_hosts()))
 
     def _menu_is_open(self) -> bool:
         """True while the tray popup menu is displayed to the user.
@@ -216,7 +257,7 @@ class TrayIconManager:
             if state != self._last_state:
                 self._last_state = state
                 try:
-                    active_count = len(state[1])
+                    active_count = len(state[-1])
                     self.icon.icon = self.create_icon_image(active_count)
                     self.icon.title = (
                         f"SSH Connection Manager — {active_count} connessioni attive"
@@ -232,25 +273,66 @@ class TrayIconManager:
     # ------------------------------------------------------------------
     # Actions
 
-    def open_settings(self, icon: pystray.Icon, item) -> None:
-        """Open the SSH config file in the default editor.
-
-        Edits are picked up automatically (no restart needed): the menu
-        refreshes as soon as the file is saved, and new tunnels/ports apply
-        to the next connection you open.
-        """
+    def open_settings(self, icon=None, item=None) -> None:
+        """Open the settings dialog (pre-warmed, instantaneous). Falls back
+        to opening ~/.ssh/config in the default editor if the dialog cannot
+        be created (the old behaviour of this entry)."""
         try:
-            ssh_config_path = SshConfigParser.get_config_path()
-            if ssh_config_path.exists():
-                os.startfile(ssh_config_path)
-            else:
-                print(f"SSH config file not found: {ssh_config_path}")
+            self._ensure_settings_dialog().show()
         except Exception as e:
-            print(f"Error opening SSH config: {e}")
+            logging.error(f"Settings dialog failed, opening SSH config: {e}", exc_info=True)
+            try:
+                os.startfile(SshConfigParser.get_config_path())
+            except Exception as e2:
+                logging.error(f"Error opening SSH config: {e2}")
+
+    def _ensure_settings_dialog(self):
+        if self._settings_dialog is None:
+            from .settings_dialog import SettingsDialog
+            self._settings_dialog = SettingsDialog(
+                ui_host=self._ensure_search_popup(),
+                host_provider=self._search_hosts,
+                on_save=self._apply_settings,
+                version=__version__,
+                ssh_config_path=SshConfigParser.get_config_path(),
+                hotkey_suspend=self._suspend_hotkey)
+            self._settings_dialog.prewarm()
+        return self._settings_dialog
+
+    def _suspend_hotkey(self, suspend: bool) -> None:
+        """While the settings dialog captures a new combination the global
+        hotkey is released, otherwise pressing it would open the search
+        popup instead of reaching the capture field."""
+        if self._hotkey is None:
+            return
+        if suspend:
+            self._hotkey.stop()
+        else:
+            self._hotkey.start()
+
+    def _apply_settings(self, values: dict):
+        """Called on the Tk thread by the settings dialog. Returns None on
+        success, or an error message to show in the dialog."""
+        values = dict(values)
+        binding = values.pop("hotkey")
+        if self._hotkey is not None and not self._hotkey.rebind(binding):
+            return (f"La scorciatoia {binding} è già usata da un altro programma: "
+                    f"scegline un'altra (resta attiva {self._hotkey.binding}).")
+        want_autostart = values.pop("autostart")
+        # Enabling is always re-applied: it refreshes the path of the exe.
+        if (want_autostart or autostart.is_enabled()) and not autostart.set_enabled(want_autostart):
+            return "Impossibile modificare l'avvio automatico (registro di Windows)."
+        AppSettings.update(hotkey=binding, **values)
+        logging.info(f"Settings saved: hotkey={binding}, autostart={want_autostart}, "
+                     f"keepalive={values.get('keepalive_interval')}, "
+                     f"tunnel_timeout={values.get('tunnel_timeout')}, "
+                     f"notifications={values.get('notifications')}")
+        return None
 
     def connect_to_host(self, host: str) -> None:
         """Connect to specified SSH host (non-blocking)"""
         print(f"Connecting to {host}...")
+        AppSettings.add_recent(host)
         SshLauncher.connect(host)
 
     def run_init_test(self, icon: pystray.Icon, item) -> None:
@@ -265,7 +347,8 @@ class TrayIconManager:
         logging.info(f"Init {env} menu item clicked")
         try:
             from ..ssh.init_orchestrator import InitOrchestrator
-            InitOrchestrator.start(env, notify=self._notify)
+            InitOrchestrator.start(
+                env, notify=lambda title, msg: notifications.notify("init", title, msg))
         except Exception as e:
             logging.error(f"run_init {env} failed: {e}", exc_info=True)
 
@@ -326,11 +409,11 @@ class TrayIconManager:
         self._open_search(None)
 
     def _on_global_hotkey(self) -> None:
-        """Called on the hotkey thread when Ctrl+Shift+Space is pressed.
+        """Called on the hotkey thread when the search shortcut is pressed.
 
         Opens the search dialog using the saved environment preference.
         """
-        logging.info("Global hotkey (Ctrl+Shift+Space) pressed")
+        logging.info(f"Global hotkey ({self._hotkey_label()}) pressed")
         self._open_search(None)
 
     def quit_application(self, icon: pystray.Icon, item) -> None:
@@ -339,6 +422,8 @@ class TrayIconManager:
         # Stop the global hotkey listener.
         if self._hotkey:
             self._hotkey.stop()
+        if self._monitor:
+            self._monitor.stop()
         if self._search_popup:
             self._search_popup.stop()
         # Hidden Init consoles have no window the user can close: kill them.
@@ -373,6 +458,20 @@ class TrayIconManager:
             refresher = threading.Thread(target=self._refresh_loop, daemon=True)
             refresher.start()
 
+            # Tray balloons for Init results and session problems
+            # (filtered by the per-kind switches in the settings).
+            notifications.set_sink(self._notify)
+            try:
+                autostart.refresh_path()
+            except Exception as e:
+                logging.debug(f"Autostart path refresh failed: {e}")
+            try:
+                from ..ssh.session_monitor import SessionMonitor
+                self._monitor = SessionMonitor()
+                self._monitor.start()
+            except Exception as e:
+                logging.warning(f"Session monitor unavailable: {e}")
+
             # Build the search popup now (hidden): constructing the Tk
             # interpreter costs ~200 ms, and doing it here means the first
             # Ctrl+Shift+Space is as instant as every following one.
@@ -380,10 +479,21 @@ class TrayIconManager:
                 self._ensure_search_popup()
             except Exception as e:
                 logging.warning(f"Search popup pre-warm failed: {e}")
+            try:
+                self._ensure_settings_dialog()   # built hidden on the same Tk thread
+            except Exception as e:
+                logging.warning(f"Settings dialog pre-warm failed: {e}")
 
-            # Global hotkey (Ctrl+Shift+Space) opens the host search popup.
-            self._hotkey = HotkeyManager(on_triggered=self._on_global_hotkey)
-            self._hotkey.start()
+            # Global hotkey (configurable, default Ctrl+Shift+Space) opens
+            # the host search popup.
+            self._hotkey = HotkeyManager(on_triggered=self._on_global_hotkey,
+                                         binding=AppSettings.get("hotkey"))
+            if not self._hotkey.start():
+                # The icon is not running yet: notify once it is.
+                threading.Timer(3.0, self._notify, args=(
+                    "Scorciatoia non disponibile",
+                    f"{self._hotkey.binding} è già usata da un altro programma. "
+                    f"Cambiala da Impostazioni.")).start()
 
             # Run the tray icon (this blocks)
             self.icon.run()
@@ -415,6 +525,8 @@ class TrayIconManager:
         """Stop the tray icon"""
         if self._hotkey:
             self._hotkey.stop()
+        if self._monitor:
+            self._monitor.stop()
         if self._search_popup:
             self._search_popup.stop()
         self._stop_event.set()

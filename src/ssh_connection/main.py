@@ -22,8 +22,10 @@ from .config.config_loader import ConfigLoader
 class SshConnectionApp:
     """Main SSH Connection Manager application"""
     
-    def __init__(self):
+    def __init__(self, autostarted: bool = False):
         self.tray_manager = TrayIconManager()
+        # Launched by the Windows "Run" key at logon: no startup message box.
+        self.autostarted = autostarted
     
     def run(self) -> None:
         """Run the application with system tray interface"""
@@ -50,7 +52,7 @@ class SshConnectionApp:
             os.system('title SSH Connection Manager')
         
         # Show startup notification
-        if getattr(sys, 'frozen', False):
+        if getattr(sys, 'frozen', False) and not self.autostarted:
             try:
                 import ctypes
                 ctypes.windll.user32.MessageBoxW(0, 
@@ -122,6 +124,11 @@ def main() -> None:
         help="List all available SSH hosts from config"
     )
     parser.add_argument(
+        "--autostart",
+        action="store_true",
+        help="Started at Windows logon (skips the startup message box)"
+    )
+    parser.add_argument(
         "--daemon",
         action="store_true",
         help="Run as daemon with system tray (default)"
@@ -129,7 +136,7 @@ def main() -> None:
     
     args = parser.parse_args()
     
-    app = SshConnectionApp()
+    app = SshConnectionApp(autostarted=args.autostart)
     
     # Handle command line options
     if args.list_hosts:

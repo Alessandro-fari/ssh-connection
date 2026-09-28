@@ -22,6 +22,13 @@ Threading contract:
   on the thread that created the interpreter.
 - The chosen host is delivered through the `on_select` callback, invoked on
   the popup thread; the caller offloads the (blocking) SSH launch itself.
+- `run_on_ui(fn)` runs any callable on this same Tk thread. The settings
+  dialog uses it to live as a Toplevel of this root: ONE Tcl interpreter,
+  ONE thread, instead of a second Tk() in another thread.
+
+Favorites / recents (AppSettings): with an empty filter the list starts with
+a "Preferiti" and a "Recenti" section; while filtering, favorites sort first
+inside each environment. Ctrl+D toggles the selected host as favorite.
 
 Foreground: a process that is not in the foreground cannot normally raise a
 window. Windows grants foreground rights to the process that received a
@@ -30,15 +37,12 @@ use the AttachThreadInput trick before SetForegroundWindow.
 """
 
 import ctypes
-import json
 import logging
 import queue
 import threading
-from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 
-# Preferences file: remembers the last chosen environment filter.
-_PREFS_FILE = Path.home() / ".ssh_connection_prefs.json"
+from ..config.app_settings import AppSettings
 
 _ENVS = ("Tutti", "TEST", "PROD")
 
@@ -52,25 +56,18 @@ _C_SEL_BG = "#2b6cb0"
 _C_SEL_FG = "#ffffff"
 
 
+_STAR = "★"
+
+
 def load_prefs_env() -> str:
     """Return the saved environment filter ('Tutti'/'TEST'/'PROD'), default 'Tutti'."""
-    try:
-        data = json.loads(_PREFS_FILE.read_text(encoding="utf-8"))
-        env = data.get("search_env", "Tutti")
-        if env in _ENVS:
-            return env
-    except Exception:
-        pass
-    return "Tutti"
+    return AppSettings.get("search_env")
 
 
 def save_prefs_env(env: str) -> None:
-    try:
-        _PREFS_FILE.write_text(
-            json.dumps({"search_env": env}, ensure_ascii=False),
-            encoding="utf-8")
-    except Exception as e:
-        logging.debug(f"Could not save prefs: {e}")
+    # Merged into the shared prefs file: the old version rewrote the whole
+    # file with only this key.
+    AppSettings.update(search_env=env)
 
 
 def _force_foreground(hwnd: int) -> None:
@@ -138,6 +135,8 @@ class SearchPopup:
         self._rows: List[dict] = []   # [{'type':'sep'|'host', 'env':..., 'host':...}]
         self._initial_env = "Tutti"
         self._env_touched = False
+        self._favs: List[str] = []
+        self._recents: List[str] = []
 
     # ------------------------------------------------------------------
     # Public API (callable from any thread)
@@ -159,6 +158,17 @@ class SearchPopup:
             logging.warning("Search popup not running; starting it now")
             self.start()
         self._requests.put(("show", initial_env))
+
+    def run_on_ui(self, fn: Callable[[], None]) -> None:
+        """Run `fn` on the Tk thread (asynchronously). Returns immediately."""
+        if not (self._thread and self._thread.is_alive()):
+            self.start()
+        self._requests.put(("call", fn))
+
+    @property
+    def root(self):
+        """The Tk root — only to be used from inside run_on_ui callbacks."""
+        return self._root
 
     def stop(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -252,6 +262,8 @@ class SearchPopup:
                 w.bind("<Up>", lambda e: self._move(-1))
                 w.bind("<Next>", lambda e: self._move(10))
                 w.bind("<Prior>", lambda e: self._move(-10))
+                w.bind("<Control-d>", lambda e: self._toggle_favorite())
+                w.bind("<Control-D>", lambda e: self._toggle_favorite())
             listbox.bind("<Double-Button-1>", lambda e: self._confirm())
             listbox.bind("<<ListboxSelect>>", self._on_click_select)
 
@@ -275,6 +287,11 @@ class SearchPopup:
                     break
                 if kind == "show":
                     self._do_show(arg)
+                elif kind == "call":
+                    try:
+                        arg()
+                    except Exception as e:
+                        logging.error(f"UI call failed: {e}", exc_info=True)
                 elif kind == "quit":
                     self._root.quit()
                     return
@@ -297,6 +314,8 @@ class SearchPopup:
             env = "Tutti"
         self._initial_env = env
         self._env_touched = False
+        self._favs = AppSettings.favorites()
+        self._recents = AppSettings.recents()
         self._var_env.set(env)
         self._var_filter.set("")     # also triggers _refresh() via the trace
         self._refresh()
@@ -337,40 +356,72 @@ class SearchPopup:
     # ------------------------------------------------------------------
     # List content
 
-    def _refresh(self) -> None:
+    def _refresh(self, keep_host: Optional[str] = None) -> None:
         needle = self._var_filter.get().strip().lower()
         sel_env = self._var_env.get() or "Tutti"
+        favs = set(self._favs)
+        env_of = {h: name for name, hosts in self._envs for h in hosts}
+
+        def visible(h):
+            return h in env_of and (sel_env == "Tutti" or env_of[h] == sel_env)
 
         rows: List[dict] = []
+
+        def section(label, hosts, tagged):
+            if hosts:
+                rows.append({"type": "sep", "label": label, "host": None})
+                rows.extend({"type": "host", "env": env_of[h], "host": h,
+                             "tagged": tagged} for h in hosts)
+
+        if not needle:
+            # Quick access first: favorites (config order kept by the user),
+            # then recents not already pinned.
+            section(_STAR + " Preferiti", [h for h in self._favs if visible(h)], True)
+            section("Recenti", [h for h in self._recents
+                                if visible(h) and h not in favs], True)
+
         for name, hosts in self._envs:
             if sel_env != "Tutti" and sel_env != name:
                 continue
             if needle:
                 matching = sorted((h for h in hosts if needle in h.lower()),
-                                  key=lambda h: (_rank(h, needle), h.lower()))
+                                  key=lambda h: (h not in favs, _rank(h, needle), h.lower()))
             else:
                 matching = list(hosts)
-            if matching:
-                rows.append({"type": "sep", "env": name, "host": None})
-                for h in matching:
-                    rows.append({"type": "host", "env": name, "host": h})
+            section(name, matching, False)
 
         self._rows = rows
         lb = self._list
         lb.delete(0, "end")
         for i, r in enumerate(rows):
             if r["type"] == "sep":
-                lb.insert("end", "  " + r["env"])
+                lb.insert("end", "  " + r["label"])
                 lb.itemconfig(i, bg=_C_SEP_BG, fg=_C_MUTED,
                               selectbackground=_C_SEP_BG,
                               selectforeground=_C_MUTED)
             else:
-                lb.insert("end", "    " + r["host"])
+                mark = _STAR + " " if r["host"] in favs else "   "
+                tag = f"   ({r['env']})" if r["tagged"] else ""
+                lb.insert("end", "  " + mark + r["host"] + tag)
 
-        n_hosts = sum(1 for r in rows if r["type"] == "host")
+        n_hosts = len({r["host"] for r in rows if r["type"] == "host"})
         self._var_status.set(
-            "{} host  -  Su/Giu naviga  -  Invio connette  -  Esc chiude".format(n_hosts))
-        self._select(self._next_host(-1, 1))
+            "{} host  -  Invio connette  -  Ctrl+D preferito  -  Esc chiude".format(n_hosts))
+        target = -1
+        if keep_host:
+            target = next((i for i, r in enumerate(rows)
+                           if r["type"] == "host" and r["host"] == keep_host), -1)
+        self._select(target if target >= 0 else self._next_host(-1, 1))
+
+    def _toggle_favorite(self) -> str:
+        idx = self._current()
+        if not (0 <= idx < len(self._rows)) or self._rows[idx]["type"] != "host":
+            return "break"
+        host = self._rows[idx]["host"]
+        AppSettings.toggle_favorite(host)
+        self._favs = AppSettings.favorites()
+        self._refresh(keep_host=host)
+        return "break"
 
     def _next_host(self, start: int, step: int) -> int:
         """First selectable (host) row from `start`+step in direction `step`."""

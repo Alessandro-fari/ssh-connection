@@ -25,10 +25,11 @@ import base64
 import logging
 import subprocess
 import threading
+import time
 from typing import Callable, List, Optional, Tuple
 
 from ..config.config_loader import ConfigLoader
-from .connection_tracker import tracker
+from .connection_tracker import kill_console, ssh_child_alive, tracker
 from .console_injector import ConsoleInjector
 from .ssh_launcher import SshLauncher
 
@@ -94,39 +95,56 @@ class InitOrchestrator:
 
             # 1) Jump host: password + token in one go (single login → the
             #    positional prompt gating in inject_secrets handles the
-            #    password prompt then the TOKEN prompt).
-            if tracker.is_active(login):
+            #    password prompt then the TOKEN prompt). session_alive (not
+            #    is_active): a console whose ssh already died must not be
+            #    "reused" — that is what made a failed Init unrecoverable.
+            if tracker.session_alive(login):
                 logging.info(f"Init {env}: {login} already active, reusing it")
-                login_ok = True
+                opened.append(login)
             else:
+                cls._discard_stale(login)
                 pid = SshLauncher.launch_for_init(login, secrets=[password, token])
-                if pid:
-                    cls._record(login, pid)
-                    opened.append(login)
-                    login_ok = True
-                else:
-                    failed.append(login)
-                    login_ok = False
+                if not pid:
+                    # launch_for_init already killed the hidden console.
+                    notify(f"Init {env} fallito",
+                           f"Login {login} non riuscito (VPN non attiva?). "
+                           f"Puoi riprovare da Init {env}.")
+                    return
+                reason = cls._await_login(pid, targets[0] if targets else login)
+                if reason:
+                    SshLauncher.discard(login, pid)
+                    notify(f"Init {env} fallito",
+                           f"{reason}. Puoi riprovare da Init {env}.")
+                    return
+                cls._record(login, pid)
+                opened.append(login)
 
             # 2) DB targets (hidden, unregistered) once the login is up.
-            if login_ok:
-                for target in targets:
-                    try:
-                        SshLauncher._wait_for_tunnel(target)
-                        pid = SshLauncher.launch_for_init(target, secrets=[password], register=False)
-                        if pid:
-                            cls._record(target, pid)
-                            opened.append(target)
-                        else:
-                            failed.append(target)
-                    except Exception as e:
-                        logging.error(f"Init {env}: error opening {target}: {e}", exc_info=True)
+            #    Targets still alive from a previous (partial) Init are kept,
+            #    so a retry only opens the missing ones.
+            alive_targets = cls._alive_sessions(targets)
+            for target in targets:
+                if target in alive_targets:
+                    logging.info(f"Init {env}: {target} already open, skipping")
+                    opened.append(target)
+                    continue
+                try:
+                    SshLauncher._wait_for_tunnel(target)
+                    pid = SshLauncher.launch_for_init(target, secrets=[password], register=False)
+                    if pid:
+                        cls._record(target, pid)
+                        opened.append(target)
+                    else:
                         failed.append(target)
+                except Exception as e:
+                    logging.error(f"Init {env}: error opening {target}: {e}", exc_info=True)
+                    failed.append(target)
 
             total = 1 + len(targets)
             if failed:
                 notify(f"Init {env} parziale", f"{len(opened)}/{total} connessioni attive. "
-                                               f"Fallite: {', '.join(failed)}")
+                                               f"Fallite: {', '.join(failed)}. "
+                                               f"Rilancia Init {env} per riprovarle.")
             else:
                 notify(f"Init {env}", f"{len(opened)}/{total} connessioni attive")
         except Exception as e:
@@ -137,6 +155,68 @@ class InitOrchestrator:
                 cls._running.discard(env)
 
     # ------------------------------------------------------------------
+
+    # Seconds to wait, after the token was typed, for proof that the login
+    # really succeeded (tunnel port open / shell prompt).
+    LOGIN_CONFIRM_SECONDS = 45.0
+
+    @classmethod
+    def _await_login(cls, pid: int, probe: str) -> Optional[str]:
+        """
+        Wait until the login in console `pid` is confirmed: the tunnel port
+        of `probe` accepts connections, or (no tunnel) a shell prompt shows.
+        Returns None on success, else a user-facing failure reason. Injecting
+        the secrets is not proof enough: a wrong token is simply rejected
+        after being typed.
+        """
+        endpoint = SshLauncher._host_endpoint(probe)
+        deadline = time.monotonic() + cls.LOGIN_CONFIRM_SECONDS
+        while time.monotonic() < deadline:
+            if not ssh_child_alive(pid):
+                return "Connessione chiusa dal server (token errato o VPN non attiva?)"
+            tail = ConsoleInjector.peek_tail(pid) or ""
+            failure = ConsoleInjector.failure_in(tail)
+            if failure:
+                logging.warning(f"Init login rejected in console {pid}: {failure!r}")
+                return f"Login rifiutato: {failure} (token errato o VPN non attiva?)"
+            if endpoint and SshLauncher._port_open(*endpoint):
+                return None
+            last = next((l.strip() for l in reversed(tail.splitlines()) if l.strip()), "")
+            if endpoint is None and last.endswith(("$", "#")):
+                return None
+            time.sleep(1.0)
+        return "Login non confermato entro il tempo limite (token errato?)"
+
+    @classmethod
+    def _discard_stale(cls, login: str) -> None:
+        """Before a new login: kill our hidden consoles of `login` (a failed
+        or dropped session nobody can close) and forget any other console of
+        it in the tracker. A VISIBLE window the user opened is left open —
+        only unregistered — so its error output stays readable."""
+        with cls._lock:
+            ours = {pid for host, pid, _ in cls._procs if host == login}
+            cls._procs = [e for e in cls._procs if e[0] != login]
+        for pid in ours:
+            kill_console(pid)
+        pid = tracker.get_pid(login)
+        while pid:
+            tracker.unregister(login, pid)
+            pid = tracker.get_pid(login)
+
+    @classmethod
+    def _alive_sessions(cls, hosts) -> set:
+        """Hosts among `hosts` with a hidden Init console whose ssh still
+        runs; consoles whose ssh died (e.g. their login dropped) are killed."""
+        alive = set()
+        for host, pid, _ in cls._live_procs():
+            if host not in hosts:
+                continue
+            if ssh_child_alive(pid):
+                alive.add(host)
+            else:
+                logging.info(f"Init: {host} console {pid} has no ssh left, killing it")
+                kill_console(pid)
+        return alive
 
     # Windows Forms token dialog, run as a SEPARATE PowerShell process.
     # Rationale: the tray runs a Win32 message loop on the main thread, and
@@ -318,6 +398,20 @@ if ($res -eq [System.Windows.Forms.DialogResult]::OK) {
         return alive
 
     @classmethod
+    def hidden_entries(cls) -> List[Tuple[str, int]]:
+        """(host, pid) of every live hidden console (for the session monitor)."""
+        return [(host, pid) for host, pid, _ in cls._live_procs()]
+
+    @classmethod
+    def busy_hosts(cls) -> set:
+        """Hosts of the environments whose Init is running right now: their
+        failures are reported by the Init itself, not by the monitor."""
+        with cls._lock:
+            envs = set(cls._running)
+        return {h for env in envs
+                for h in (INIT_ENVS[env]["login"],) + tuple(INIT_ENVS[env]["targets"])}
+
+    @classmethod
     def is_running(cls) -> bool:
         return bool(cls._running) or bool(cls._live_procs())
 
@@ -329,7 +423,7 @@ if ($res -eq [System.Windows.Forms.DialogResult]::OK) {
             try:
                 proc = psutil.Process(pid)
                 if abs(proc.create_time() - ct) < 1.0:
-                    proc.kill()
+                    kill_console(pid)
                     logging.info(f"Init shutdown: killed hidden console {host} (PID {pid})")
             except psutil.Error:
                 continue

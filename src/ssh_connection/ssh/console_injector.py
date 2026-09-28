@@ -76,6 +76,27 @@ class ConsoleInjector:
     # password prompt of a plain connection.
     EXTRA_PROMPT_TOKENS = ("token", "otp", "verification code", "codice")
     HOSTKEY_TOKEN = "yes/no"
+    # Console output meaning the ssh login cannot succeed (wrong password or
+    # token, VPN down, host unreachable). Checked against the lowercased tail.
+    FAILURE_MARKERS = (
+        "permission denied", "access denied", "authentication failed",
+        "invalid username or password", "session not started",
+        "connection timed out", "could not resolve hostname",
+        "connection refused", "no route to host", "network is unreachable",
+        "connection closed by", "connection reset",
+    )
+
+    @classmethod
+    def failure_in(cls, tail: str) -> str:
+        """The first failure marker found in `tail`, or '' if none."""
+        tail = tail.lower()
+        return next((m for m in cls.FAILURE_MARKERS if m in tail), "")
+
+    @classmethod
+    def peek_tail(cls, pid: int, lines: int = 6):
+        """Last console lines of `pid` (thread-safe), None on failure."""
+        with _console_lock:
+            return cls._peek_tail(pid, lines)
 
     @classmethod
     def inject_password(cls, pid: int, password: str, timeout: float = 30.0) -> bool:
@@ -128,6 +149,12 @@ class ConsoleInjector:
                         return False
 
                     tail = cls._read_tail(conout, lines=4).lower()
+                    failure = cls.failure_in(tail)
+                    if failure:
+                        # ssh gave up (VPN down, auth rejected): no point
+                        # waiting for a prompt that will never come.
+                        logging.warning(f"Login failed in console {pid}: {failure!r}")
+                        return False
                     cursor_y = cls._cursor_y(conout)
                     last_line = next(
                         (l.strip() for l in reversed(tail.splitlines()) if l.strip()), "")

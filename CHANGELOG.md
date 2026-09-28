@@ -26,6 +26,161 @@ annotati nella voce stessa. Formato ispirato a [Keep a Changelog](https://keepac
     la ricerca pre-filtrata, che l'hotkey globale non fa.
 
 ### Modificato
+- **2026-09-28** — **Dialog Impostazioni: preferiti e scorciatoia più chiari** (feedback
+  d'uso).
+  - *Preferiti*: la lista a selezione multipla non si capiva. Ora in alto ci sono tutti
+    gli host, con un filtro; si seleziona una riga e si preme **"Aggiungi ai
+    preferiti"** (o doppio clic). Sotto c'è la lista dei preferiti già aggiunti, con
+    **Rimuovi** e **Su/Giù** per l'ordine, che è quello di menu e popup. I preferiti
+    non più presenti nel config restano visibili come "(non più nel config)" invece
+    di sparire in silenzio.
+  - *Scorciatoia*: le checkbox dei modificatori + combo del tasto sono sostituite da
+    un **campo di cattura**. Clicchi e premi la combinazione (anteprima dei
+    modificatori premuti, Esc annulla), con il pulsante **"Predefinita"**
+    (Ctrl+Shift+Space). Il tasto finale si legge dal codice virtuale di Windows
+    (`event.keycode`), non dal keysym, che dipende dal layout: con la tastiera
+    italiana Shift+1 dà "exclam". Mentre il campo ha il focus l'hotkey globale è
+    **sospesa** (`TrayIconManager._suspend_hotkey`); altrimenti `RegisterHotKey`
+    intercetterebbe la combinazione attuale e aprirebbe la ricerca.
+  - *Avvio automatico*: sotto la checkbox c'è una riga che dice cosa parte al login:
+    il collegamento in *Esecuzione automatica* oppure l'exe registrato in `Run`, con
+    un avviso se quel file non esiste più. All'avvio `autostart.refresh_path()`
+    aggiorna la voce `Run` se punta a un exe spostato o rinominato, e ogni
+    salvataggio con la checkbox attiva riscrive il percorso corrente.
+  - Test: `binding_from_keys`, cattura con sospensione/ripristino dell'hotkey,
+    aggiungi/rimuovi/riordina preferiti. `tests/test_features.py` ora usa un file
+    prefs temporaneo: leggeva quello reale e falliva con una scorciatoia
+    personalizzata.
+  - *Nota*: `tests/test_settings_monitor.py` era stato rimosso dal "Cleanup" di
+    Sophos (evento sulla versione con i binari rinominati) ed è stato ricreato
+    nella versione pulita.
+
+### Aggiunto
+- **2026-09-28** — **Dialog Impostazioni** (voce di menu **"Impostazioni..."**, ex
+  "Settings"). Prima la voce apriva solo `~/.ssh/config` in Notepad; ora apre un
+  dialog tkinter a schede:
+  - *Generale*: scorciatoia di ricerca (modificatori Ctrl/Shift/Alt/Win + tasto),
+    intervallo keepalive, timeout di attesa del tunnel, avvio automatico con Windows;
+  - *Notifiche*: un interruttore per ciascun tipo di notifica;
+  - *Preferiti*: selezione degli host preferiti, pulsante "Svuota recenti";
+  - *Info*: versione, percorsi di config/preferenze/log, pulsanti "Apri config SSH"
+    e "Apri log".
+  *Pre-warm*: è un `Toplevel` dello **stesso** interprete Tk del popup di ricerca,
+  pilotato con `SearchPopup.run_on_ui()`. Si costruisce nascosto all'avvio e si apre
+  all'istante. Un secondo `Tk()` su un altro thread sarebbe stato un secondo
+  interprete Tcl, che non è thread-safe.
+  Il salvataggio è validato: una scorciatoia senza modificatori o già usata da un
+  altro programma (`RegisterHotKey` errore 1409) mostra l'errore, il dialog resta
+  aperto e la scorciatoia precedente torna attiva (`HotkeyManager.rebind`).
+  Keepalive e timeout valgono dalla prossima connessione, senza riavvio.
+  Se il dialog non si può creare, la voce ricade sul vecchio comportamento (apre
+  `~/.ssh/config`).
+  - Nuovo `config/app_settings.py` (`AppSettings`): unico punto di accesso a
+    `~/.ssh_connection_prefs.json`, con lock, read-modify-write e scrittura atomica.
+    **Fix collegato**: il vecchio `save_prefs_env` riscriveva il file con la sola
+    chiave `search_env`, e avrebbe cancellato tutte le altre preferenze.
+  - Nuovo `config/autostart.py`: chiave `HKCU\...\CurrentVersion\Run`, senza
+    privilegi admin. Conta come "attivo" anche il collegamento nella cartella
+    *Esecuzione automatica* creato da `build_release.py`. L'attivazione non aggiunge
+    la voce di registro se il collegamento c'è già, la disattivazione li rimuove
+    entrambi: l'app non parte mai due volte.
+  - `main.py --autostart` (passato dalla voce di registro): all'avvio con Windows
+    niente message box "starting...".
+- **2026-09-28** — **Preferiti e Recenti**.
+  - *Menu tray*: in cima c'è l'intestazione "Preferiti" con gli host preferiti,
+    cliccabili direttamente e con la bitmap di stato colorata. Sotto, il sottomenu
+    "Recenti" con gli ultimi 5 host connessi. Gli host non più presenti in
+    `~/.ssh/config` vengono ignorati.
+  - *Popup di ricerca*: senza filtro la lista parte con le sezioni "★ Preferiti" e
+    "Recenti" (preferiti esclusi); il primo preferito è preselezionato, quindi
+    hotkey + Invio apre subito l'host preferito. Mentre si filtra, i preferiti
+    vengono ordinati per primi in ogni ambiente e marcati con ★. `Ctrl+D` aggiunge
+    o toglie dai preferiti l'host selezionato.
+  - I recenti sono registrati in `TrayIconManager.connect_to_host`, quindi valgono
+    per menu, preferiti e popup; gli Init non li alimentano.
+  - Il refresh loop della tray include ora l'mtime del file preferenze nello
+    stato, così il menu si aggiorna subito dopo una modifica.
+- **2026-09-28** — **Notifiche di problemi sulle sessioni** (nuovo
+  `ssh/session_monitor.py`, thread con tick di 3 s, e `notifications.py`, un sink
+  centrale filtrato per tipo dalle impostazioni):
+  - *Connessione chiusa inaspettatamente*. Il monitor tiene un handle Win32 su ogni
+    `ssh.exe`, per leggerne l'exit code dopo la chiusura (la console
+    `-NoExit` sopravvive a ssh):
+    - console visibili: notifica solo con codice **255** (errore di ssh: rete, VPN,
+      ServerAlive timeout); logout normale e finestra chiusa dall'utente restano
+      silenziosi;
+    - console nascoste di Init: qualsiasi uscita viene notificata, con l'invito a
+      rilanciare Init; la console orfana viene uccisa;
+    - uscite causate da noi (`kill_console`) vengono ignorate
+      (`expect_exit`/`exit_was_expected`), come i fallimenti durante un Init in
+      corso, che segnala già l'Init (`InitOrchestrator.busy_hosts`).
+  - *Tunnel perso*. Per ogni sessione viva, le porte LocalForward risolte da
+    `ssh -G <host>` (gestisce i blocchi `Host *it1tf*` come ssh) devono risultare
+    in LISTEN da un `ssh.exe` nella tabella TCP (`psutil.net_connections`), quindi
+    **nessun traffico** verso DB o sshd remoti. La notifica parte se una porta
+    smette di essere in ascolto, o se una sessione nuova non l'ha aperta entro
+    30 s (tipicamente la porta è già occupata). Una sola notifica finché la porta
+    non torna attiva.
+  - *Keepalive non avviato*. `SshLauncher._run_keepalive` verifica 5 s dopo l'invio
+    che `watch` sia partito (niente "command not found", niente prompt tornato
+    subito) e notifica se il prompt shell non compare mai. Non notifica se la
+    sessione è già morta: in quel caso lo segnala il monitor.
+  - Anche l'esito di Init passa ora dal sink (tipo `init`), quindi è disattivabile.
+  - Test: nuova suite `tests/test_settings_monitor.py`: preferenze,
+    parsing/rebind della hotkey, menu con preferiti/recenti, popup e dialog
+    Impostazioni reali, monitor (exit 255/0/kill nostro/console nascosta), tunnel
+    (salute, perdita, ri-armo, grace), keepalive.
+  - Build: aggiunti gli hidden import `session_monitor`, `settings_dialog`,
+    `app_settings`, `autostart`, `notifications`, `tkinter.ttk` in
+    `build_release.py`/`build_debug.py`.
+  *Nota sui test*: la prima versione simulava ssh copiando `cmd.exe`/`PING.EXE`
+  come `%TEMP%\sshcm-test-*\ssh.exe`. Sophos l'ha correttamente bloccata come
+  *masquerading* (Evade_13a, T1036.003), uccidendo il processo di test. Ora
+  `connection_tracker.SSH_PROCESS_NAMES` è configurabile: i test eseguono i binari
+  di sistema **dal loro percorso originale** e li riconoscono per nome. Mai copiare
+  o rinominare un eseguibile di sistema.
+  *Problemi noti*: una sessione visibile con ssh chiuso resta "attiva" nel menu
+  finché la finestra è aperta, perché la semantica di `is_active` non è cambiata.
+  Non è stata fatta una prova end-to-end sul server reale (VPN/token): il flusso è
+  coperto dai test con processi simulati.
+
+### Corretto
+- **2026-09-28** — **Init ripetibile dopo un login fallito** (token sbagliato o VPN
+  non attiva). Prima un Init fallito era irrecuperabile: bisognava chiudere e
+  rilanciare l'applicazione.
+  *Causa*: la console è `powershell -NoExit`. Quando ssh termina (VPN giù →
+  *Connection timed out*; token rifiutato → *Access denied* / *Invalid username or
+  password*), PowerShell resta vivo, nascosto e non chiudibile. Il tracker lo
+  considerava quindi `login_*` **attivo**, e ogni Init successivo "riusava" una
+  sessione morta invece di rifare il login. Anche le console nascoste dei target
+  falliti restavano orfane.
+  *Fix*:
+  - `ConsoleInjector.FAILURE_MARKERS` / `failure_in()`: l'iniezione si interrompe
+    subito quando ssh stampa un errore di connessione o autenticazione. Prima
+    aspettava inutilmente il timeout di 60 s.
+  - `InitOrchestrator._await_login()`: dopo l'invio del token attende la *prova* che
+    il login sia riuscito (porta del tunnel aperta, o prompt shell), fino a 45 s.
+    Aver scritto il token non basta: un token errato viene rifiutato dopo.
+  - Ogni login fallito viene **ucciso e deregistrato** (`SshLauncher.discard`,
+    `kill_console` che termina anche `ssh.exe`, `tracker.unregister`). Lo stesso
+    vale per qualsiasi console nascosta la cui iniezione fallisce. La notifica
+    indica il motivo e invita a riprovare da *Init TEST/PROD*.
+  - Il riuso del login usa `tracker.session_alive()`, che richiede un `ssh.exe`
+    vivo sotto la console, invece di `is_active()`. Prima di un nuovo login,
+    `_discard_stale()` elimina le console nascoste rimaste; le finestre
+    **visibili** vengono solo deregistrate, così il loro output d'errore resta
+    leggibile.
+  - Un Init *parziale* si può rilanciare: i target con ssh ancora vivo vengono
+    tenuti, quelli morti vengono uccisi e riaperti.
+  - `shutdown()` ora uccide anche i processi `ssh.exe` figli, non solo PowerShell.
+  - Test `[3b]` in `tests/test_features.py`: marker di errore, rilevamento del
+    figlio ssh (con un finto `ssh.exe`), `kill_console`, retry di `_run` dopo un
+    login fallito.
+  *Nota*: la semantica di `is_active()` non cambia (menu e altri flussi invariati).
+  Una sessione visibile con ssh chiuso resta quindi "attiva" nel menu finché la
+  finestra è aperta.
+
+### Modificato
 - **2026-09-21** — **Ricerca host riscritta in tkinter, apertura istantanea**.
   Il dialog PowerShell/WinForms introdotto il 2026-09-17 aveva due difetti
   bloccanti: (1) *lentezza* — ogni apertura lanciava `powershell.exe` e faceva

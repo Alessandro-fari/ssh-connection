@@ -8,7 +8,9 @@ from pathlib import Path
 from typing import List, Optional, Sequence
 
 from ..config.config_loader import ConfigLoader
-from .connection_tracker import tracker
+from .. import notifications
+from ..config.app_settings import AppSettings
+from .connection_tracker import kill_console, ssh_child_alive, tracker
 from .console_injector import ConsoleInjector
 from .ssh_config_parser import SshConfigParser
 
@@ -16,14 +18,20 @@ from .ssh_config_parser import SshConfigParser
 class SshLauncher:
     """SSH connection launcher with automated, terminal-targeted credential input"""
 
-    # Max seconds to wait for the jump host's LocalForward tunnel port to
-    # accept connections. Generous because the login may involve a manual
-    # 2FA token entry by the user.
-    TUNNEL_WAIT_SECONDS = 120.0
+    # How long to wait for the jump host's LocalForward tunnel port
+    # (settings: tunnel_timeout, default 120 s — generous because the login
+    # may involve a manual 2FA token entry) and the keepalive typed at the
+    # shell prompt so the session and its tunnels stay alive (settings:
+    # keepalive_interval). Both are read at use time, so changes from the
+    # settings dialog apply to the next connection without a restart.
 
-    # Typed into the jump host terminal once its shell prompt appears, so
-    # the session (and its tunnels) stays alive.
-    KEEPALIVE_COMMAND = "watch -n 240 date"
+    @staticmethod
+    def tunnel_wait_seconds() -> float:
+        return float(AppSettings.get("tunnel_timeout"))
+
+    @staticmethod
+    def keepalive_command() -> str:
+        return f"watch -n {AppSettings.get('keepalive_interval')} date"
 
     @staticmethod
     def connect(name: str) -> None:
@@ -130,7 +138,8 @@ class SshLauncher:
 
         host, port = endpoint
         logging.info(f"Waiting for tunnel {host}:{port} for {name}...")
-        deadline = time.monotonic() + cls.TUNNEL_WAIT_SECONDS
+        wait = cls.tunnel_wait_seconds()
+        deadline = time.monotonic() + wait
         while time.monotonic() < deadline:
             try:
                 with socket.create_connection((host, port), timeout=1.5):
@@ -138,7 +147,7 @@ class SshLauncher:
                     return
             except OSError:
                 time.sleep(1.0)
-        logging.warning(f"Tunnel {host}:{port} not available after {cls.TUNNEL_WAIT_SECONDS}s, trying anyway")
+        logging.warning(f"Tunnel {host}:{port} not available after {wait:.0f}s, trying anyway")
 
     @staticmethod
     def _ssh_executable() -> str:
@@ -214,6 +223,11 @@ class SshLauncher:
             # Blocks until the prompt(s) appear in THAT console and the
             # secrets are written into its input buffer (focus-independent).
             if not ConsoleInjector.inject_secrets(process.pid, secrets, timeout=inject_timeout):
+                if hidden:
+                    # Nobody can see or close a hidden console: kill it and
+                    # forget it, otherwise the failed login keeps looking
+                    # "active" and blocks any retry.
+                    SshLauncher.discard(name, process.pid)
                 return None
 
         want_keepalive = keepalive if keepalive is not None else name.lower().startswith("login")
@@ -222,12 +236,49 @@ class SshLauncher:
             # run the keepalive so the session and its tunnels don't expire.
             # Runs in background: the shell prompt may take a while to appear.
             threading.Thread(
-                target=ConsoleInjector.run_command_at_shell_prompt,
-                args=(process.pid, SshLauncher.KEEPALIVE_COMMAND),
+                target=SshLauncher._run_keepalive,
+                args=(process.pid, name),
                 daemon=True,
             ).start()
 
         return process.pid
+
+    # Seconds after typing the keepalive to check it actually took over.
+    KEEPALIVE_VERIFY_SECONDS = 5.0
+
+    @staticmethod
+    def _run_keepalive(pid: int, name: str) -> None:
+        """Send the keepalive command, verify it started, notify if not.
+
+        Failures because the session itself went away (console closed, ssh
+        exited) are not reported here: the session monitor reports those.
+        """
+        command = SshLauncher.keepalive_command()
+        ok = ConsoleInjector.run_command_at_shell_prompt(pid, command)
+        reason = "il prompt della shell non è mai comparso"
+        if ok:
+            time.sleep(SshLauncher.KEEPALIVE_VERIFY_SECONDS)
+            tail = (ConsoleInjector.peek_tail(pid) or "")
+            last = next((l.strip() for l in reversed(tail.splitlines()) if l.strip()), "")
+            if "not found" in tail.lower() or "no such file" in tail.lower():
+                ok, reason = False, "il comando watch non esiste sul server"
+            elif last.endswith(("$", "#")):
+                # Back at a prompt: `watch` exited right away.
+                ok, reason = False, "il comando watch è terminato subito"
+        if ok:
+            return
+        if not ssh_child_alive(pid):
+            return  # session gone: reported by the monitor, not a keepalive issue
+        notifications.notify(
+            "keepalive_failed", "Keepalive non avviato",
+            f"{name}: {reason}. La sessione potrebbe scadere per inattività.")
+
+    @staticmethod
+    def discard(name: str, pid: int) -> None:
+        """Kill a console (and its ssh) and drop it from the tracker."""
+        logging.info(f"Discarding console of {name} (PID {pid})")
+        kill_console(pid)
+        tracker.unregister(name, pid)
 
     @staticmethod
     def launch_for_init(name: str, secrets: Sequence[str], register: bool = True) -> Optional[int]:
