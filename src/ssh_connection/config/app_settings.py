@@ -15,6 +15,10 @@ Keys (all optional in the file; defaults below):
   notifications       {kind: bool} — see NOTIFICATION_KINDS
   favorites           [host, ...] — pinned at the top of menu and popup
   recents             [host, ...] — most recent first, at most MAX_RECENTS
+  prod_console_theme  colour scheme of PROD consoles ('Nessuno' = none),
+                      see ssh.console_themes
+  file_search_paths   {host: [path, ...]} — remote folders used in the file
+                      search window, most recent first (MAX_FILE_PATHS)
 """
 
 import json
@@ -27,6 +31,7 @@ from typing import Any, Dict, List
 PREFS_FILE = Path.home() / ".ssh_connection_prefs.json"
 
 MAX_RECENTS = 5
+MAX_FILE_PATHS = 10
 
 # kind -> label shown in the settings dialog
 NOTIFICATION_KINDS = {
@@ -44,6 +49,8 @@ DEFAULTS: Dict[str, Any] = {
     "notifications": {k: True for k in NOTIFICATION_KINDS},
     "favorites": [],
     "recents": [],
+    "prod_console_theme": "Ubuntu-ColorScheme",
+    "file_search_paths": {},
 }
 
 # (min, max) accepted for the numeric settings
@@ -132,8 +139,21 @@ class AppSettings:
             return out[:MAX_RECENTS] if key == "recents" else out
         if key == "search_env":
             return value if value in ("Tutti", "TEST", "PROD") else default
-        if key == "hotkey":
+        if key in ("hotkey", "prod_console_theme"):
             return value if isinstance(value, str) and value else default
+        if key == "file_search_paths":
+            if not isinstance(value, dict):
+                return {}
+            out = {}
+            for host, paths in value.items():
+                if isinstance(host, str) and isinstance(paths, list):
+                    clean = []
+                    for p in paths:
+                        if isinstance(p, str) and p.strip() and p.strip() not in clean:
+                            clean.append(p.strip())
+                    if clean:
+                        out[host] = clean[:MAX_FILE_PATHS]
+            return out
         return value
 
     # ------------------------------------------------------------------
@@ -175,3 +195,19 @@ class AppSettings:
         with cls._lock:
             rec = [h for h in cls.recents() if h != host]
             cls.update(recents=[host] + rec)
+
+    @classmethod
+    def file_search_paths(cls, host: str) -> List[str]:
+        """Remote folders searched on `host`, most recent first."""
+        return list(cls.get("file_search_paths").get(host, []))
+
+    @classmethod
+    def add_file_search_path(cls, host: str, path: str) -> None:
+        """Move `path` to the front of `host`'s folder history."""
+        path = path.strip()
+        if not path:
+            return
+        with cls._lock:
+            all_paths = cls.get("file_search_paths")
+            all_paths[host] = [path] + [p for p in all_paths.get(host, []) if p != path]
+            cls.update(file_search_paths=all_paths)

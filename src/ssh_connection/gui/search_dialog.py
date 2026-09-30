@@ -29,6 +29,7 @@ Threading contract:
 Favorites / recents (AppSettings): with an empty filter the list starts with
 a "Preferiti" and a "Recenti" section; while filtering, favorites sort first
 inside each environment. Ctrl+D toggles the selected host as favorite.
+Ctrl+F opens the "Cerca file" window on the selected host (`on_file_search`).
 
 Foreground: a process that is not in the foreground cannot normally raise a
 window. Windows grants foreground rights to the process that received a
@@ -108,6 +109,75 @@ def _rank(host: str, needle: str) -> int:
     return 3
 
 
+# --- host list shared with the "Cerca file" window -----------------------
+
+def build_host_rows(envs: Sequence[Tuple[str, List[str]]], favorites: Sequence[str],
+                    recents: Sequence[str], needle: str, sel_env: str) -> List[dict]:
+    """Rows of a host list: {'type': 'sep', 'label'} separators and
+    {'type': 'host', 'env', 'host', 'tagged'} hosts.
+
+    With an empty filter the list starts with "★ Preferiti" (user order) and
+    "Recenti" (not already pinned), then one section per environment; while
+    filtering, only the environment sections remain, best match first
+    (favorites before the others). `sel_env` 'TEST'/'PROD' narrows it."""
+    needle = (needle or "").strip().lower()
+    sel_env = sel_env or "Tutti"
+    favs = set(favorites)
+    env_of = {h: name for name, hosts in envs for h in hosts}
+
+    def visible(h):
+        return h in env_of and (sel_env == "Tutti" or env_of[h] == sel_env)
+
+    rows: List[dict] = []
+
+    def section(label, hosts, tagged):
+        if hosts:
+            rows.append({"type": "sep", "label": label, "host": None})
+            rows.extend({"type": "host", "env": env_of[h], "host": h,
+                         "tagged": tagged} for h in hosts)
+
+    if not needle:
+        section(_STAR + " Preferiti", [h for h in favorites if visible(h)], True)
+        section("Recenti", [h for h in recents if visible(h) and h not in favs], True)
+
+    for name, hosts in envs:
+        if sel_env != "Tutti" and sel_env != name:
+            continue
+        if needle:
+            matching = sorted((h for h in hosts if needle in h.lower()),
+                              key=lambda h: (h not in favs, _rank(h, needle), h.lower()))
+        else:
+            matching = list(hosts)
+        section(name, matching, False)
+    return rows
+
+
+def fill_host_listbox(listbox, rows: List[dict], favorites: Sequence[str]) -> None:
+    """Show `rows` in a tk.Listbox: separators greyed and visually
+    unselectable, favorites starred, quick-access rows tagged with the env."""
+    favs = set(favorites)
+    listbox.delete(0, "end")
+    for i, r in enumerate(rows):
+        if r["type"] == "sep":
+            listbox.insert("end", "  " + r["label"])
+            listbox.itemconfig(i, bg=_C_SEP_BG, fg=_C_MUTED,
+                               selectbackground=_C_SEP_BG, selectforeground=_C_MUTED)
+        else:
+            mark = _STAR + " " if r["host"] in favs else "   "
+            tag = f"   ({r['env']})" if r["tagged"] else ""
+            listbox.insert("end", "  " + mark + r["host"] + tag)
+
+
+def next_host_row(rows: List[dict], start: int, step: int) -> int:
+    """First host row from `start`+step in direction `step` (-1 if none)."""
+    i = start + step
+    while 0 <= i < len(rows):
+        if rows[i]["type"] == "host":
+            return i
+        i += step
+    return -1
+
+
 class SearchPopup:
     """Pre-warmed host search popup.
 
@@ -124,9 +194,11 @@ class SearchPopup:
 
     def __init__(self,
                  host_provider: Callable[[], Sequence[Tuple[str, List[str]]]],
-                 on_select: Callable[[str], None]):
+                 on_select: Callable[[str], None],
+                 on_file_search: Optional[Callable[[str], None]] = None):
         self._host_provider = host_provider
         self._on_select = on_select
+        self._on_file_search = on_file_search
         self._requests: "queue.Queue[tuple]" = queue.Queue()
         self._thread: Optional[threading.Thread] = None
         self._ready = threading.Event()
@@ -264,6 +336,8 @@ class SearchPopup:
                 w.bind("<Prior>", lambda e: self._move(-10))
                 w.bind("<Control-d>", lambda e: self._toggle_favorite())
                 w.bind("<Control-D>", lambda e: self._toggle_favorite())
+                w.bind("<Control-f>", lambda e: self._file_search())
+                w.bind("<Control-F>", lambda e: self._file_search())
             listbox.bind("<Double-Button-1>", lambda e: self._confirm())
             listbox.bind("<<ListboxSelect>>", self._on_click_select)
 
@@ -357,56 +431,15 @@ class SearchPopup:
     # List content
 
     def _refresh(self, keep_host: Optional[str] = None) -> None:
-        needle = self._var_filter.get().strip().lower()
-        sel_env = self._var_env.get() or "Tutti"
-        favs = set(self._favs)
-        env_of = {h: name for name, hosts in self._envs for h in hosts}
-
-        def visible(h):
-            return h in env_of and (sel_env == "Tutti" or env_of[h] == sel_env)
-
-        rows: List[dict] = []
-
-        def section(label, hosts, tagged):
-            if hosts:
-                rows.append({"type": "sep", "label": label, "host": None})
-                rows.extend({"type": "host", "env": env_of[h], "host": h,
-                             "tagged": tagged} for h in hosts)
-
-        if not needle:
-            # Quick access first: favorites (config order kept by the user),
-            # then recents not already pinned.
-            section(_STAR + " Preferiti", [h for h in self._favs if visible(h)], True)
-            section("Recenti", [h for h in self._recents
-                                if visible(h) and h not in favs], True)
-
-        for name, hosts in self._envs:
-            if sel_env != "Tutti" and sel_env != name:
-                continue
-            if needle:
-                matching = sorted((h for h in hosts if needle in h.lower()),
-                                  key=lambda h: (h not in favs, _rank(h, needle), h.lower()))
-            else:
-                matching = list(hosts)
-            section(name, matching, False)
-
+        rows = build_host_rows(self._envs, self._favs, self._recents,
+                               self._var_filter.get(), self._var_env.get())
         self._rows = rows
-        lb = self._list
-        lb.delete(0, "end")
-        for i, r in enumerate(rows):
-            if r["type"] == "sep":
-                lb.insert("end", "  " + r["label"])
-                lb.itemconfig(i, bg=_C_SEP_BG, fg=_C_MUTED,
-                              selectbackground=_C_SEP_BG,
-                              selectforeground=_C_MUTED)
-            else:
-                mark = _STAR + " " if r["host"] in favs else "   "
-                tag = f"   ({r['env']})" if r["tagged"] else ""
-                lb.insert("end", "  " + mark + r["host"] + tag)
+        fill_host_listbox(self._list, rows, self._favs)
 
         n_hosts = len({r["host"] for r in rows if r["type"] == "host"})
         self._var_status.set(
-            "{} host  -  Invio connette  -  Ctrl+D preferito  -  Esc chiude".format(n_hosts))
+            "{} host  -  Invio connette  -  Ctrl+D preferito  -  Ctrl+F cerca file  -  "
+            "Esc chiude".format(n_hosts))
         target = -1
         if keep_host:
             target = next((i for i, r in enumerate(rows)
@@ -423,14 +456,22 @@ class SearchPopup:
         self._refresh(keep_host=host)
         return "break"
 
+    def _file_search(self) -> str:
+        """Ctrl+F: open the file search window on the selected host."""
+        idx = self._current()
+        if (self._on_file_search is None or not (0 <= idx < len(self._rows))
+                or self._rows[idx]["type"] != "host"):
+            return "break"
+        host = self._rows[idx]["host"]
+        self._hide()
+        try:
+            self._on_file_search(host)
+        except Exception as e:
+            logging.error(f"Search on_file_search failed: {e}", exc_info=True)
+        return "break"
+
     def _next_host(self, start: int, step: int) -> int:
-        """First selectable (host) row from `start`+step in direction `step`."""
-        i = start + step
-        while 0 <= i < len(self._rows):
-            if self._rows[i]["type"] == "host":
-                return i
-            i += step
-        return -1
+        return next_host_row(self._rows, start, step)
 
     def _select(self, idx: int) -> None:
         lb = self._list

@@ -72,7 +72,173 @@ annotati nella voce stessa. Formato ispirato a [Keep a Changelog](https://keepac
     Sophos (evento sulla versione con i binari rinominati) ed è stato ricreato
     nella versione pulita.
 
+### Corretto
+- **2026-09-30** — **"Cerca file" non trovava nulla nelle cartelle applicative**:
+  0 risultati in 0,1 s su `/app/nets/batchcommon` di `stlit1te01`, dove i file c'erano.
+  *Causa*: la cartella è una catena di link simbolici. `batchcommon` punta a
+  `BATCHCOMMON_3.2.0.3`, `files` a `/files/nets/batchcommon_3.0.0/`, `clear` a
+  `/files/nets/batchcommon/clear`. Senza opzioni `find` non segue i link, nemmeno quello
+  di partenza, mentre il controllo `[ -d ]` iniziale li segue: nessun errore e nessun
+  risultato.
+  *Fix*: `find -L` in tutte le invocazioni dello script. Con `-L` anche `-type f`,
+  dimensione e data si riferiscono al file puntato. GNU find riconosce i cicli di link e
+  li salta; valgono i limiti già presenti (2000 risultati, timeout).
+  - Verificato dal vivo: la stessa ricerca ora trova 2 file (quello in `files/clear` e la
+    copia `.pgp` in `files/cache/outgoing/completed`) in 1,4 s.
+  - Test di regressione sulla presenza di `-L`. Il test locale con `sh` non può creare
+    link simbolici veri su Windows senza privilegi.
+
 ### Aggiunto
+- **2026-09-30** — **"Cerca file": navigazione delle cartelle come WinSCP** (richiesta
+  d'uso: con la sola ricerca non si vedevano cartelle e percorsi). La lista mostra la
+  cartella corrente: prima le cartelle, poi i file, con `..` in cima; i link simbolici
+  sono segnati con `→`.
+  - *Muoversi*: doppio clic o Invio su una cartella per entrarci; `..`, Backspace o ▲
+    per salire; ◀ (o Alt+←) per tornare alla cartella precedente; ⌂ per la home; ⟳ per
+    aggiornare. Il percorso si può scrivere nella barra (Invio). La tendina propone le
+    ultime cartelle visitate o cercate su quell'host.
+  - *Link simbolici*: vengono seguiti per capire se puntano a una cartella, e il percorso
+    resta quello **logico** (`/app/nets/batchcommon/files/clear`), come in WinSCP, non
+    quello fisico a cui risolvono. Un link rotto compare come file da 0 byte.
+  - *Filtro*: scrivendo nel campo **Nome** si filtra la cartella corrente in locale,
+    senza richieste al server. **Invio** o **Cerca** lanciano la ricerca remota
+    (`find -L`) *a partire dalla cartella corrente*. I risultati mostrano la colonna
+    Cartella e una barra "Risultati della ricerca in …" con "✕ Torna alla cartella".
+    **"Vai alla cartella"** apre la cartella del risultato con il file selezionato.
+  - *File*: doppio clic apre in Blocco note dalla copia temporanea, come prima. Scarica e
+    Copia percorso funzionano anche sulle cartelle (solo copia percorso).
+  - *Apertura*: scelto un host, la sua ultima cartella (o `~`) viene elencata da sola
+    **solo se il tunnel è già attivo** (`route_ready`, probe TCP sulla porta locale).
+    Scorrere la lista degli host non deve mai aprire un login con token. Se il tunnel è
+    giù, la riga di stato lo dice e un'azione esplicita (Invio sull'host, ⟳, un percorso)
+    si connette come un terminale, aprendo il login se serve. L'elenco automatico parte
+    400 ms dopo la scelta, così digitare nel filtro host non connette a ogni tasto.
+  - *Cambio host durante un'operazione lenta*: ora è permesso. La sessione vecchia viene
+    chiusa e il suo risultato tardivo scartato. Lo stato "occupato" è legato alla sessione
+    (`_busy_session`). `RemoteSession.close()` marca la sessione come chiusa e un
+    `connect()` ancora in corso su un worker non tiene la connessione (niente
+    connessioni orfane).
+  - *Come*: `RemoteSession.listdir()` / `resolve_folder()` via SFTP (`listdir_attr`, più
+    `stat` solo per i link), sulla stessa connessione paramiko. `RemoteFile` ha
+    `is_dir` / `is_link`. Icone cartella/file disegnate con `PhotoImage`, perché Tk 8.6
+    non disegna emoji fuori dal piano BMP.
+  - *Incidente durante lo sviluppo*: una prova dal vivo, lanciata mentre l'app era chiusa
+    per la build e quindi con i tunnel giù, ha aperto una console di login `login_test`
+    (`ensure_route`). L'ho chiusa subito. Da qui la regola: l'elenco automatico e le prove
+    sul server si fanno solo se `route_ready`. Nella stessa prova è emerso il bug di
+    `connect()`, che chiamando `close()` per ripulire si marcava come chiuso: ora usa
+    `_close_client()`.
+  - Test: filesystem finto per navigazione, filtro locale, ricerca e "Vai alla cartella",
+    errori, tunnel giù, cambio host durante un elenco lento; `listdir` con SFTP finto
+    (link a cartella, link rotto, permessi, percorsi logici). 94 controlli, stabili su 3
+    esecuzioni. Il crash dump del grep di Git generato dal test ora finisce nella
+    cartella temporanea e non più nel repository.
+- **2026-09-30** — **"Cerca file": pannello host come il popup "Cerca host"** (feedback
+  d'uso: mancavano il filtro Tutti/TEST/PROD e i preferiti/recenti, e la combo scrivibile
+  non si capiva). A sinistra ora c'è un campo di ricerca, la combo Tutti/TEST/PROD e la
+  lista con le sezioni **★ Preferiti**, **Recenti**, **TEST** e **PROD**.
+  - Digitando, la lista si filtra e l'host più pertinente diventa quello attivo.
+  - ↑/↓ e PagSu/PagGiù saltano i separatori; il clic sceglie l'host; Invio passa al nome
+    file; **Ctrl+D** aggiunge o toglie dai preferiti, gli stessi del menu e del popup.
+  - Il filtro d'ambiente parte da quello salvato dal popup (`search_env`). Se l'host
+    richiesto con Ctrl+F non vi rientra, si allarga a "Tutti".
+  - Una ricerca riuscita aggiunge l'host ai Recenti, gli stessi di menu e popup.
+  - Il focus va sul nome file se l'host arriva da Ctrl+F, altrimenti sul campo host.
+  - Mentre un'operazione è in corso l'host non si può cambiare.
+  - *Come*: la costruzione delle righe (sezioni, filtro, ordinamento per rilevanza), il
+    disegno nella `Listbox` e la navigazione che salta i separatori sono stati estratti da
+    `SearchPopup` in funzioni condivise di `search_dialog.py`: `build_host_rows`,
+    `fill_host_listbox` e `next_host_row`. Popup e "Cerca file" si comportano in modo
+    identico. La vecchia combo host scrivibile (`matching_hosts` / `_commit_host`) è
+    rimossa.
+  - Ritocchi: riga di aiuto del nome file accorciata (era tagliata) e colonne dei
+    risultati ristrette (la colonna "Modificato" usciva dal bordo). Finestra larga 1000 px.
+- **2026-09-30** — **Host in ordine alfabetico** in ogni sezione TEST/PROD: menu tray,
+  popup "Cerca host", Impostazioni (preferiti) e "Cerca file". Prima seguivano l'ordine
+  di `~/.ssh/config`, scomodo con quasi 30 host PROD.
+  - Il jump host (`login_*`) resta in cima alla sezione: è il punto d'ingresso
+    dell'ambiente. Gli altri sono ordinati senza distinguere maiuscole e minuscole.
+  - Un host ripetuto nel config compare una volta sola: `travelit1pe05`, definito due
+    volte in PROD, appariva doppio nel menu.
+  - L'ordine è applicato in un solo punto, `SshConfigParser.sort_hosts()`, chiamato a fine
+    `parse_ssh_config()`. Nessun altro uso del parser dipende dall'ordine (jump host,
+    tunnel, monitor). Preferiti e Recenti mantengono il loro ordine.
+- **2026-09-28** — **Console PROD riconoscibili a colpo d'occhio.** Ogni terminale ha
+  il titolo `[TEST] host` / `[PROD] host`. Le console PROD usano lo schema colori
+  **Ubuntu-ColorScheme** di Windows Terminal (sfondo melanzana `#300A24`) e si aprono
+  con un banner `PRODUZIONE - host`.
+  *Perché*: serve a non scambiare una sessione PROD per una TEST prima di lanciare un
+  comando.
+  - *Come*: il launcher antepone a `ssh` qualche istruzione PowerShell
+    (`_console_preamble`) che imposta il titolo e manda le sequenze OSC 4 (palette a 16
+    colori) e OSC 10/11/12 (colori *predefiniti* di testo, sfondo e cursore). Poi pulisce
+    lo schermo. Si cambiano i colori predefiniti, non l'attributo corrente, così anche
+    `SGR 0` e `clear` del server remoto restano nel tema. Funziona in Windows Terminal e
+    in conhost. Il terminale si lancia sempre allo stesso modo: il PID della console
+    resta noto, quindi iniezione e tracking non cambiano.
+  - ESC e BEL non possono viaggiare sulla riga di comando: vengono scritti come `|` e
+    `!` e ripristinati da PowerShell con `.Replace()`.
+  - *Impostazioni → Generale → "Tema delle console PROD"*: "Nessuno", gli schemi
+    integrati e quelli definiti in `settings.json` di Windows Terminal. Il valore è
+    salvato nella preferenza `prod_console_theme`. Le console nascoste di Init non
+    ricevono il preambolo.
+  - *Scelte*: il primo tentativo (sfondo rosso pieno) è stato scartato perché troppo
+    aggressivo. Tra i temi di prova (ambra, blu, bordeaux, ardesia) è stato preferito lo
+    schema Ubuntu di Windows Terminal. Le TEST hanno solo il titolo, per massimo
+    contrasto con PROD.
+  - *Limite noto*: una shell remota il cui `PS1` imposta il titolo lo sovrascrive. I
+    colori invece restano.
+- **2026-09-28** — **Finestra "Cerca file"** (voce di menu **"Cerca file..."**, oppure
+  **Ctrl+F** sull'host selezionato nel popup "Cerca host"). Cerca file per nome, ed
+  eventualmente per contenuto, in una cartella di un host. Il testo digitato si cerca
+  come "contiene", altrimenti vale con caratteri jolly (`*.log`); c'è l'opzione
+  sottocartelle. I risultati mostrano nome, cartella, dimensione e data, dal più recente.
+  - *Host*: campo scrivibile con filtro mentre si digita, come nel popup host (feedback
+    d'uso: la sola tendina era scomoda). Invio sceglie la corrispondenza migliore;
+    freccia giù apre la lista filtrata. Aprire la tendina non conferma l'host.
+  - *Apri* (doppio clic o Invio) funziona come in WinSCP: scarica il file in una
+    cartella temporanea univoca (`%TEMP%/SSH-Connection-Manager/<host>/<id>/`), lo apre
+    in Blocco note e **cancella la copia quando Blocco note si chiude**. È una copia in
+    sola lettura: le modifiche non vengono mai ricaricate sul server, per sicurezza in
+    PROD. Gli archivi e i documenti (`.gz`, `.zip`, `.pdf`...) si aprono col programma
+    associato. Oltre 50 MB viene chiesta conferma.
+  - Se Blocco note passa il file a una finestra già aperta (schede di Windows 11), il
+    processo termina subito e la copia non si può cancellare in quel momento: la pulisce
+    `purge_open_dir()` all'uscita dall'app e al successivo avvio.
+  - *Scarica...* salva dove si vuole (default Download). *Copia percorso* (anche Ctrl+C).
+    *Interrompi* chiude il comando remoto in corso.
+  - Le cartelle cercate sono ricordate per host (preferenza `file_search_paths`, le
+    ultime 10) e proposte nella combo.
+  - *Come*: nuovo modulo `ssh/remote_files.py` basato su **paramiko** (nuova
+    dipendenza). I terminali sono interattivi, mentre qui serve l'*output* di `find` più
+    un trasferimento SFTP. OpenSSH per Windows non ha ControlMaster, e SSH_ASKPASS
+    richiederebbe di passare la password a un processo esterno. Il percorso di rete è
+    quello dei terminali: `SshLauncher.ensure_route()` (estratto da `_connect_sync`)
+    apre il jump host se serve e attende il tunnel. `ssh -G` risolve HostName e Port
+    (es. `localhost:2222`). Le credenziali vengono da `ConfigLoader`. `known_hosts` si
+    legge in sola lettura: una chiave diversa è rifiutata, un host sconosciuto è
+    accettato come fa il launcher.
+  - I jump host (`login_*`) sono esclusi: il loro login chiede il token 2FA.
+  - Testato su `stlit1tf01` (TEST): connessione in 1,7 s, `/var/log` elencato in
+    1,6 s, download SFTP, copia temporanea rimossa alla chiusura di Blocco note.
+  - Un'anteprima delle ultime righe è stata provata e poi tolta su richiesta: basta aprire
+    il file.
+  - Test: `tests/test_theme_file_search.py` (63 controlli), con lo script `find` eseguito
+    davvero con `sh`. *Nota (2026-09-29)*: il GNU grep 3.0 di Git per Windows va in
+    abort con `-i -F` insieme. Il controllo sul filtro per contenuto viene quindi saltato
+    se il grep locale è difettoso. Sul server (grep 2.20) il filtro è verificato dal vivo.
+- **2026-09-28** — Build: `paramiko` aggiunto a `requirements.txt`, `setup.py` e alle
+  dipendenze degli script di build. Nuovi hidden import PyInstaller:
+  `file_search_dialog`, `remote_files`, `console_themes`, `paramiko`.
+- **2026-09-30** — Build **release e debug** con navigazione cartelle, fix link simbolici,
+  pannello host e ordinamento alfabetico (`dist/SSH-Connection-Manager.exe`, `.zip`,
+  `-DEBUG.exe`). Moduli nuovi e `paramiko` verificati in entrambi i `PYZ`.
+- **2026-09-30** — Build release con console PROD a tema e "Cerca file"
+  (`dist/SSH-Connection-Manager.exe` e `.zip`). Verificato nel `PYZ` che i nuovi
+  moduli e `paramiko` siano inclusi. Il primo tentativo era fallito perché l'exe in
+  esecuzione nella tray era bloccato ("Accesso negato"): prima del build va chiusa
+  l'app.
+
 - **2026-09-28** — **Dialog Impostazioni** (voce di menu **"Impostazioni..."**, ex
   "Settings"). Prima la voce apriva solo `~/.ssh/config` in Notepad; ora apre un
   dialog tkinter a schede:

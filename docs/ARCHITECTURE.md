@@ -60,6 +60,9 @@ mirato della password nel terminale e stato live delle connessioni.
 ### `ssh/ssh_config_parser.py` — parsing di `~/.ssh/config`
 - Legge il file e classifica gli host in sezioni **TEST** e **PROD** in base ai
   commenti di intestazione (`# ... TEST ...` / `# ... PROD ...`).
+- Restituisce ogni sezione ordinata (`sort_hosts`): jump host `login*` in cima, poi
+  gli altri in ordine alfabetico senza distinguere maiuscole e minuscole, senza
+  doppioni. È l'ordine di menu, popup, Impostazioni e "Cerca file".
 - Ignora gli host wildcard (`*`). Nessuna cache: viene ri-parsato a ogni richiesta,
   ed è questo che rende possibile l'hot-reload della configurazione.
 
@@ -126,6 +129,66 @@ token 2FA, apre un ambiente. Config in costante `INIT_ENVS = {TEST: {login, targ
   - `_discard_stale()` ripulisce le console nascoste rimaste prima di un nuovo login;
   - `_alive_sessions()` fa sì che un retry riapra solo i target mancanti o morti.
   - `_launch(hidden=True)` scarta da sé la console quando l'iniezione fallisce.
+
+### `ssh/console_themes.py` — console PROD riconoscibili
+`SshLauncher._console_preamble(name)` antepone a `ssh` (solo console visibili) il titolo
+`[TEST|PROD] host` e, per PROD, lo schema colori scelto in `prod_console_theme`
+(default **Ubuntu-ColorScheme**) più un banner `PRODUZIONE - host`.
+`console_themes.osc_sequences()` traduce uno schema in formato Windows Terminal in
+OSC 4 (palette 0-15) e OSC 10/11/12 (testo, sfondo e cursore *predefiniti*). Così
+`SGR 0` e `clear` remoti restano nel tema, in Windows Terminal come in conhost.
+ESC/BEL viaggiano sulla riga di comando come `|`/`!` e PowerShell li ripristina. Gli
+schemi offerti sono quelli integrati più quelli del `settings.json` di Windows Terminal.
+
+### `ssh/remote_files.py` — ricerca e download file remoti
+`RemoteSession(host)`: una connessione **paramiko** per host, pigra e riusata,
+serializzata da un lock e usata solo da thread worker.
+- `connect()`: `SshLauncher.ensure_route()` (jump host + attesa tunnel, lo stesso
+  percorso dei terminali), poi `ssh -G` per HostName/Port, credenziali da
+  `ConfigLoader`. `known_hosts` è caricato come "system host keys": in sola lettura,
+  mai riscritto. Chiave diversa → rifiuto; host sconosciuto → accettato e loggato.
+  `login_*` escluso perché richiede il token.
+- `find()`: script POSIX `sh` (`find_command`) con `find -L -iname` (`-L`: le cartelle
+  applicative sui server sono catene di link simbolici), `-maxdepth 1`
+  opzionale e `-exec grep -qiF` per il contenuto. Con `-printf` GNU ottiene mtime e
+  dimensione, con fallback `-print`; massimo 2000 risultati; cartella inesistente
+  segnalata con un marker. `cancel()` chiude il canale in corso.
+- `listdir()` / `resolve_folder()`: elenco SFTP (`listdir_attr`, `stat` solo per i link
+  per distinguere cartelle e link rotti). Il percorso resta **logico** (`~`, relativi e
+  `..` risolti testualmente, link non risolti); cartelle prima.
+- `route_ready(host)`: probe TCP della porta del tunnel, senza aprire nulla.
+- `close()` è definitivo (`_closed`): un `connect()` ancora in corso scarta la
+  connessione; `_close_client()` è la pulizia interna.
+- `download()`: SFTP su file `.part`, rinominato a fine trasferimento.
+- Gli errori per l'utente sono `RemoteError`, con messaggio in italiano.
+
+### `gui/file_search_dialog.py` — finestra "Cerca file" (navigazione + ricerca)
+**Navigazione come WinSCP** (modalità `browse`): `_navigate(folder)` elenca via
+`RemoteSession.listdir`, con la pila `_back` per ◀; ▲/Backspace salgono
+(`parent_path`), ⌂ va a `~`, la barra del percorso è editabile (cronologia in
+`file_search_paths`). Nome digitato → filtro locale (`name_matches`, stesse regole di
+`glob_for`); Invio/Cerca → `find` dalla cartella corrente (modalità `search`, colonna
+Cartella e banner visibili, "Vai alla cartella"). L'elenco automatico di un host appena
+scelto parte dopo `AUTO_LIST_DELAY_MS` e solo se `route_ready(host)`; altrimenti serve
+un'azione esplicita, che può aprire il login come un terminale. Lo stato occupato è per
+sessione (`_busy_session`): cambiare host chiude la sessione, sblocca la UI e i
+risultati tardivi della vecchia vengono scartati.
+
+`Toplevel` dello stesso root Tk di `SearchPopup`, costruita e pilotata tramite
+`run_on_ui`. Aperta dalla voce tray "Cerca file..." o da **Ctrl+F** nel popup host
+(`on_file_search`). A sinistra il pannello host: campo filtro, combo Tutti/TEST/PROD e
+lista con Preferiti, Recenti e ambienti. Le righe vengono dalle stesse funzioni del popup
+(`build_host_rows` / `fill_host_listbox` / `next_host_row` in `search_dialog.py`),
+quindi i due elenchi si comportano allo stesso modo. La riga selezionata è l'host
+attivo: filtrare sceglie la corrispondenza migliore; frecce e clic cambiano host; Ctrl+D
+aggiorna i preferiti condivisi. Una ricerca riuscita aggiorna i Recenti. Ogni
+operazione di rete gira su un thread worker (`_run_async`) e i risultati tornano via
+`run_on_ui`; se l'host è cambiato nel frattempo vengono scartati. Una sola operazione
+alla volta. "Apri" funziona come WinSCP: copia in `OPEN_DIR/<host>/<id>/`, Blocco note,
+cancellazione alla chiusura del processo. Se il processo vive meno di 5 s il file è
+passato a una finestra già aperta: la copia resta a `purge_open_dir()`, chiamata
+all'uscita dalla tray e alla creazione del dialog. La cronologia delle cartelle è salvata
+per host in `file_search_paths`.
 
 ### `ssh/console_injector.py` — iniezione mirata nella console (Win32)
 Il componente più delicato. Scrive il testo **direttamente nel buffer di input della
@@ -255,6 +318,9 @@ delle righe diversamente dal previsto (il dialog di fatto non funzionava).
   `Listbox` risultati con separatori TEST/PROD resi non selezionabili via
   `itemconfig` (sfondo/selezione identici) e saltati dalla navigazione + riga
   di stato con il conteggio host e i tasti disponibili.
+- **Righe condivise**: `build_host_rows()` (sezioni Preferiti/Recenti/ambienti, filtro,
+  rilevanza), `fill_host_listbox()` e `next_host_row()` sono funzioni di modulo, riusate
+  dal pannello host di "Cerca file".
 - **Filtro**: sottostringa case-insensitive, riapplicata a ogni keystroke
   (`trace_add("write")`) e a ogni cambio combo, con ordinamento per rilevanza
   (`_rank`: esatto < prefisso < confine di parola < sottostringa).
@@ -282,7 +348,7 @@ Rimuovi / Su / Giù) salvata con "Salva". `collect()` valida e restituisce i val
 ### `config/app_settings.py` e `config/autostart.py`
 - `AppSettings`: preferenze utente in `~/.ssh_connection_prefs.json` (`search_env`,
   `hotkey`, `keepalive_interval`, `tunnel_timeout`, `notifications`, `favorites`,
-  `recents`), con valori sanificati e limitati, lock e scrittura atomica.
+  `recents`, `prod_console_theme`, `file_search_paths`), con valori sanificati e limitati, lock e scrittura atomica.
   `SshLauncher.keepalive_command()`/`tunnel_wait_seconds()` le leggono al momento
   dell'uso.
 - `autostart`: voce `HKCU\...\Run` con `--autostart`; considera anche il
@@ -322,5 +388,6 @@ compatibile con la preesistente implementazione Java. Output Base64.
 ## Dipendenze principali
 
 `pystray` (tray icon), `Pillow` (immagini icona/bitmap), `psutil` (tracking processi),
+`paramiko` (ricerca/download file, solo "Cerca file"),
 `PyYAML` (config), `cryptography` (AES). Le API Win32 sono usate via `ctypes`
 (nessuna dipendenza pywin32).

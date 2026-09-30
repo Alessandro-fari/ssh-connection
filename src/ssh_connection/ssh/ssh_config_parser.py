@@ -54,8 +54,16 @@ class SshConfigParser:
             print(f"SSH config file not found: {ssh_config_path}")
         except Exception as e:
             print(f"Error parsing SSH config: {e}")
-        
-        return host_map
+
+        return {section: SshConfigParser.sort_hosts(hosts) for section, hosts in host_map.items()}
+
+    @staticmethod
+    def sort_hosts(hosts: List[str]) -> List[str]:
+        """Display order of a section: the jump host(s) (login*) first — the
+        entry point of the environment — then the other hosts alphabetically
+        (case-insensitive). A host listed twice in the config appears once."""
+        unique = list(dict.fromkeys(hosts))
+        return sorted(unique, key=lambda h: (not h.lower().startswith("login"), h.lower()))
 
 
 if __name__ == "__main__":

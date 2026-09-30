@@ -13,6 +13,7 @@ setup(
         "pyyaml>=6.0",
         "cryptography>=3.4.0",
         "psutil>=5.8.0",
+        "paramiko>=3.0",
     ],
     entry_points={
         "console_scripts": [

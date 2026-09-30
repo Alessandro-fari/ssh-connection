@@ -27,7 +27,7 @@ def install_dependencies():
     """Install required dependencies"""
     python_cmd = get_python_executable()
     
-    dependencies = ["pyinstaller", "pywin32", "pystray", "pillow", "pyyaml", "cryptography", "psutil"]
+    dependencies = ["pyinstaller", "pywin32", "pystray", "pillow", "pyyaml", "cryptography", "psutil", "paramiko"]
     
     print("Installing dependencies...")
     for dep in dependencies:
@@ -92,6 +92,10 @@ def build_exe():
         "--hiddenimport", "ssh_connection.ssh.init_orchestrator",
         "--hiddenimport", "ssh_connection.ssh.session_monitor",
         "--hiddenimport", "ssh_connection.gui.settings_dialog",
+        "--hiddenimport", "ssh_connection.gui.file_search_dialog",
+        "--hiddenimport", "ssh_connection.ssh.remote_files",
+        "--hiddenimport", "ssh_connection.ssh.console_themes",
+        "--hiddenimport", "paramiko",
         "--hiddenimport", "ssh_connection.config.app_settings",
         "--hiddenimport", "ssh_connection.config.autostart",
         "--hiddenimport", "ssh_connection.notifications",

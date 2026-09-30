@@ -68,6 +68,7 @@ class TrayIconManager:
         self._hotkey = None
         self._search_popup = None
         self._settings_dialog = None
+        self._file_search = None
         self._monitor = None
         try:
             from .win32_menu_bitmaps import MenuBitmaps
@@ -175,6 +176,7 @@ class TrayIconManager:
         items_out.append(pystray.MenuItem(
             f"Cerca host...	{self._hotkey_label()}",
             self._open_search_top))
+        items_out.append(pystray.MenuItem("Cerca file...", self.open_file_search))
         items_out.append(pystray.Menu.SEPARATOR)
         items_out.append(pystray.MenuItem("Init TEST", self.run_init_test))
         items_out.append(pystray.MenuItem("Init PROD", self.run_init_prod))
@@ -299,6 +301,25 @@ class TrayIconManager:
             self._settings_dialog.prewarm()
         return self._settings_dialog
 
+    def open_file_search(self, icon=None, item=None) -> None:
+        """Tray entry "Cerca file..." (pystray actions take at most 2 args)."""
+        self.open_file_search_on(None)
+
+    def open_file_search_on(self, host) -> None:
+        """Open the "Cerca file" window, on `host` or on the last one used."""
+        try:
+            self._ensure_file_search().show(host)
+        except Exception as e:
+            logging.error(f"File search window failed: {e}", exc_info=True)
+
+    def _ensure_file_search(self):
+        if self._file_search is None:
+            from .file_search_dialog import FileSearchDialog
+            self._file_search = FileSearchDialog(
+                ui_host=self._ensure_search_popup(),
+                host_provider=self._search_hosts)
+        return self._file_search
+
     def _suspend_hotkey(self, suspend: bool) -> None:
         """While the settings dialog captures a new combination the global
         hotkey is released, otherwise pressing it would open the search
@@ -385,7 +406,8 @@ class TrayIconManager:
             from .search_dialog import SearchPopup
             self._search_popup = SearchPopup(
                 host_provider=self._search_hosts,
-                on_select=self._on_search_selected)
+                on_select=self._on_search_selected,
+                on_file_search=self.open_file_search_on)
             self._search_popup.start()
         return self._search_popup
 
@@ -426,6 +448,12 @@ class TrayIconManager:
             self._monitor.stop()
         if self._search_popup:
             self._search_popup.stop()
+        # Temporary copies of remote files opened from "Cerca file".
+        try:
+            from .file_search_dialog import purge_open_dir
+            purge_open_dir()
+        except Exception as e:
+            logging.debug(f"Purging opened files failed: {e}")
         # Hidden Init consoles have no window the user can close: kill them.
         try:
             from ..ssh.init_orchestrator import InitOrchestrator

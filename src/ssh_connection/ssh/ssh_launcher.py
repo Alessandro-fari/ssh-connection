@@ -9,6 +9,7 @@ from typing import List, Optional, Sequence
 
 from ..config.config_loader import ConfigLoader
 from .. import notifications
+from . import console_themes
 from ..config.app_settings import AppSettings
 from .connection_tracker import kill_console, ssh_child_alive, tracker
 from .console_injector import ConsoleInjector
@@ -49,24 +50,32 @@ class SshLauncher:
     @staticmethod
     def _connect_sync(name: str) -> None:
         try:
-            jump = SshLauncher._required_jump_host(name)
-            if jump and not tracker.is_active(jump):
-                endpoint = SshLauncher._host_endpoint(name)
-                if endpoint and SshLauncher._port_open(*endpoint):
-                    # Tunnel already up: the jump host was opened outside
-                    # this app instance — no need to launch it again.
-                    logging.info(f"Tunnel for {name} already up, skipping {jump} launch")
-                else:
-                    logging.info(f"Jump host {jump} not connected — launching it before {name}")
-                    SshLauncher._launch(jump)
-            if jump:
-                # The target connects through a LocalForward tunnel of the
-                # jump host: wait until that port actually accepts
-                # connections (the login may include a manual 2FA token).
-                SshLauncher._wait_for_tunnel(name)
+            SshLauncher.ensure_route(name)
             SshLauncher._launch(name)
         except Exception as e:
             logging.error(f"Error launching SSH connection to {name}: {e}", exc_info=True)
+
+    @staticmethod
+    def ensure_route(name: str) -> None:
+        """Make `name` reachable: if its jump host (login_*) is not connected
+        yet, launch it, then wait for the LocalForward tunnel `name` goes
+        through. Blocking (up to the tunnel timeout). Shared by the terminal
+        connections and the file search (RemoteSession)."""
+        jump = SshLauncher._required_jump_host(name)
+        if jump and not tracker.is_active(jump):
+            endpoint = SshLauncher._host_endpoint(name)
+            if endpoint and SshLauncher._port_open(*endpoint):
+                # Tunnel already up: the jump host was opened outside
+                # this app instance — no need to launch it again.
+                logging.info(f"Tunnel for {name} already up, skipping {jump} launch")
+            else:
+                logging.info(f"Jump host {jump} not connected — launching it before {name}")
+                SshLauncher._launch(jump)
+        if jump:
+            # The target connects through a LocalForward tunnel of the
+            # jump host: wait until that port actually accepts
+            # connections (the login may include a manual 2FA token).
+            SshLauncher._wait_for_tunnel(name)
 
     @staticmethod
     def _required_jump_host(name: str) -> Optional[str]:
@@ -162,6 +171,45 @@ class SshLauncher:
         return shutil.which('ssh') or 'ssh'
 
     @staticmethod
+    def environment_of(name: str) -> Optional[str]:
+        """'TEST' / 'PROD' section of `name` in ~/.ssh/config, or None."""
+        for section, hosts in SshConfigParser.parse_ssh_config().items():
+            if name in hosts:
+                return section
+        return None
+
+    @classmethod
+    def _console_preamble(cls, name: str) -> str:
+        """PowerShell run before ssh so the terminal shows where it points.
+
+        Every console gets the title '[TEST] host' / '[PROD] host'. PROD
+        consoles also get the colour scheme chosen in the settings
+        (`prod_console_theme`, default Ubuntu-ColorScheme — see
+        console_themes) and a banner line. The scheme sets the *default*
+        colours, so SGR 0 and `clear` from the remote shell keep it, in both
+        Windows Terminal and conhost. A remote shell whose PS1 sets the
+        title can still replace the title, but not the colours.
+        """
+        env = cls.environment_of(name)
+        label = f"[{env}] {name}" if env else name
+        ps = ["$Host.UI.RawUI.WindowTitle='{}'".format(label.replace("'", "''"))]
+        if env == "PROD":
+            seq = console_themes.osc_sequences(AppSettings.get("prod_console_theme"))
+            if seq:
+                # Control characters can't travel on the command line: ESC
+                # and BEL are spelled '|' and '!' (never used by the
+                # sequences) and restored by PowerShell. The screen and the
+                # scrollback are then cleared so they repaint in the new
+                # default colours.
+                seq += "\x1b[2J\x1b[3J\x1b[H"
+                ps.append("[Console]::Write('{}'.Replace('|',[string][char]27)"
+                          ".Replace('!',[string][char]7))".format(
+                              seq.replace("\x1b", "|").replace("\x07", "!")))
+            ps.append("Write-Host '  PRODUZIONE - {}  ' -BackgroundColor DarkRed "
+                      "-ForegroundColor White".format(name.replace("'", "''")))
+        return "; ".join(ps) + "; "
+
+    @staticmethod
     def _launch(name: str, *, hidden: bool = False,
                 secrets: Optional[Sequence[str]] = None,
                 register: bool = True,
@@ -200,8 +248,11 @@ class SshLauncher:
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = 0  # SW_HIDE
 
+        command = f"& '{SshLauncher._ssh_executable()}' {target}"
+        if not hidden:
+            command = SshLauncher._console_preamble(name) + command
         process = subprocess.Popen(
-            ['powershell', '-NoExit', '-Command', f"& '{SshLauncher._ssh_executable()}' {target}"],
+            ['powershell', '-NoExit', '-Command', command],
             creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP,
             startupinfo=startupinfo,
             close_fds=True,

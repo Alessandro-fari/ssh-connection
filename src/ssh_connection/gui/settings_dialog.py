@@ -31,6 +31,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 from ..config import autostart
 from ..config.app_settings import DEFAULTS, LIMITS, NOTIFICATION_KINDS, AppSettings
 from ..config.config_loader import ConfigLoader
+from ..ssh import console_themes
 from .hotkey_manager import KEYS, MODIFIERS, parse_binding
 from .search_dialog import (_C_BG, _C_HEADER, _C_MUTED, _C_SEL_BG, _C_SEL_FG,
                             _C_TEXT, _force_foreground)
@@ -193,6 +194,15 @@ class SettingsDialog:
         tk.Label(g, textvariable=self._var_autostart_hint, justify="left", wraplength=400,
                  **hint).grid(row=7, column=0, columnspan=2, sticky="w")
 
+        tk.Label(g, text="Tema delle console PROD", **lbl).grid(row=8, column=0, sticky="w", pady=(12, 0))
+        self._var_prod_theme = tk.StringVar()
+        self._prod_theme_combo = ttk.Combobox(g, textvariable=self._var_prod_theme,
+                                              state="readonly", width=24)
+        self._prod_theme_combo.grid(row=8, column=1, sticky="w", padx=8, pady=(12, 0))
+        tk.Label(g, text="Schema colori applicato ai terminali PROD (anche quelli definiti in "
+                         "Windows Terminal). Tutte le console hanno il titolo [TEST]/[PROD] host.",
+                 justify="left", wraplength=420, **hint).grid(row=9, column=0, columnspan=2, sticky="w")
+
         # --- Notifiche --------------------------------------------------
         n = tab("Notifiche")
         tk.Label(n, text="Mostra una notifica per:", **lbl).pack(anchor="w", pady=(0, 4))
@@ -287,6 +297,12 @@ class SettingsDialog:
         self._var_tunnel.set(str(cfg["tunnel_timeout"]))
         self._var_autostart.set(autostart.is_enabled())
         self._var_autostart_hint.set(autostart.describe())
+        names = console_themes.scheme_names()
+        theme = cfg["prod_console_theme"]
+        if theme not in names:
+            names.append(theme)       # keep a saved scheme even if WT dropped it
+        self._prod_theme_combo["values"] = names
+        self._var_prod_theme.set(theme)
         for kind, v in self._notif_vars.items():
             v.set(cfg["notifications"].get(kind, True))
 
@@ -312,7 +328,7 @@ class SettingsDialog:
         self._build()
         self._load_values()
         top = self._top
-        w, h = 500, 560
+        w, h = 500, 610
         x = (top.winfo_screenwidth() - w) // 2
         y = max(40, (top.winfo_screenheight() - h) // 3)
         top.geometry(f"{w}x{h}+{x}+{y}")
@@ -524,6 +540,7 @@ class SettingsDialog:
         values["notifications"] = {k: v.get() for k, v in self._notif_vars.items()}
         values["favorites"] = list(self._favorites)
         values["autostart"] = self._var_autostart.get()
+        values["prod_console_theme"] = self._var_prod_theme.get() or console_themes.NO_THEME
         return values, None
 
     def _save(self) -> None:
