@@ -249,6 +249,7 @@ class FakeSession:
 def test_file_search_dialog():
     print("\n[5] Cerca file window: host panel, browsing, search, Ctrl+F")
     from ssh_connection.gui import file_search_dialog as fsd
+    from ssh_connection.gui import theme
     from ssh_connection.gui.search_dialog import SearchPopup
 
     hosts = [("TEST", ["login_test", "stlit1tf01"]), ("PROD", ["login_prod", "stlit1pf01"])]
@@ -426,8 +427,24 @@ def test_file_search_dialog():
         on_ui(lambda: out.update(status=dlg._var_status.get(), folder=dlg._folder,
                                  color=dlg._status_label.cget("fg")))
         check("missing folder: red message, stays where it was",
-              "non esiste" in out["status"] and out["color"] == fsd._C_ERROR
+              "non esiste" in out["status"] and out["color"] == theme.color("error")
               and out["folder"] == "/home/u/logs", str(out))
+
+        # --- dark theme: switching repaints the open window -------------------
+        def colors():
+            sep = next(i for i, r in enumerate(dlg._host_rows) if r["type"] == "sep")
+            out.update(status=dlg._status_label.cget("fg"), bg=dlg._top.cget("bg"),
+                       sep=dlg._host_list.itemcget(sep, "bg"))
+        on_ui(lambda: (theme.use(True), colors()))
+        dark = theme.PALETTES["dark"]
+        check("dark theme repaints window, error status and separator rows",
+              (out["bg"], out["status"], out["sep"]) == (dark["bg"], dark["error"], dark["sep_bg"]),
+              str(out))
+        on_ui(lambda: (theme.use(False), colors()))
+        light = theme.PALETTES["light"]
+        check("back to the light theme",
+              (out["bg"], out["status"], out["sep"]) == (light["bg"], light["error"], light["sep_bg"]),
+              str(out))
 
         # --- host panel: typing, env filter, arrows, Ctrl+D -----------------
         ready["value"] = False             # tunnel down: nothing may connect by itself

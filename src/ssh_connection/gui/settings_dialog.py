@@ -33,8 +33,9 @@ from ..config.app_settings import DEFAULTS, LIMITS, NOTIFICATION_KINDS, AppSetti
 from ..config.config_loader import ConfigLoader
 from ..ssh import console_themes
 from .hotkey_manager import KEYS, MODIFIERS, parse_binding
-from .search_dialog import (_C_BG, _C_HEADER, _C_MUTED, _C_SEL_BG, _C_SEL_FG,
-                            _C_TEXT, _force_foreground)
+from . import theme
+from .search_dialog import _force_foreground
+from .theme import px
 
 LOG_FILE = Path.home() / "ssh_connection_debug.log"
 
@@ -114,59 +115,70 @@ class SettingsDialog:
         top = tk.Toplevel(self._ui.root)
         self._top = top
         top.title("SSH Connection Manager - Impostazioni")
-        top.configure(bg=_C_BG)
+        theme.toplevel(top)
         top.resizable(False, False)
         top.withdraw()
         top.protocol("WM_DELETE_WINDOW", self._hide)
         top.bind("<Escape>", lambda e: self._hide())
 
-        band = tk.Frame(top, bg=_C_HEADER, height=48)
+        band = theme.style(tk.Frame(top, height=px(48)), "header")
         band.pack(fill="x")
         band.pack_propagate(False)
-        tk.Label(band, text="Impostazioni", bg=_C_HEADER, fg="white",
-                 font=("Segoe UI", 14, "bold")).pack(side="left", padx=20)
+        theme.style(tk.Label(band, text="Impostazioni", font=("Segoe UI", 14, "bold")),
+                    "header_title").pack(side="left", padx=20)
 
         nb = ttk.Notebook(top)
         nb.pack(fill="both", expand=True, padx=16, pady=(12, 0))
 
+        def frame(parent, **kw):
+            return theme.style(tk.Frame(parent, **kw), "window")
+
         def tab(title):
-            f = tk.Frame(nb, bg=_C_BG, padx=14, pady=12)
+            f = frame(nb, padx=14, pady=12)
             nb.add(f, text=title)
             return f
 
-        lbl = dict(bg=_C_BG, fg=_C_TEXT, font=("Segoe UI", 9))
-        hint = dict(bg=_C_BG, fg=_C_MUTED, font=("Segoe UI", 8))
-        chk = dict(bg=_C_BG, activebackground=_C_BG, font=("Segoe UI", 9), anchor="w")
-        btn = dict(relief="flat", bg="#dfe4ea", font=("Segoe UI", 9), cursor="hand2")
+        def label(parent, text="", role="label", size=9, **kw):
+            return theme.style(tk.Label(parent, text=text, font=("Segoe UI", size), **kw), role)
+
+        def hint(parent, text="", **kw):
+            return label(parent, text, "hint", size=8, **kw)
+
+        def check(parent, text, var):
+            return theme.style(tk.Checkbutton(parent, text=text, variable=var, anchor="w",
+                                              font=("Segoe UI", 9)), "check")
+
+        def button(parent, text, command, role="button", bold=False, **kw):
+            font = ("Segoe UI", 9, "bold") if bold else ("Segoe UI", 9)
+            return theme.style(tk.Button(parent, text=text, command=command, relief="flat",
+                                         font=font, cursor="hand2", **kw), role)
 
         def listbox(parent, height, **kw):
-            frame = tk.Frame(parent, bg=_C_BG)
-            lb = tk.Listbox(frame, height=height, activestyle="none",
-                            exportselection=False, relief="solid", bd=1,
-                            highlightthickness=0, font=("Segoe UI", 9), fg=_C_TEXT,
-                            selectbackground=_C_SEL_BG, selectforeground=_C_SEL_FG, **kw)
+            f = frame(parent)
+            lb = theme.style(tk.Listbox(f, height=height, activestyle="none",
+                                        exportselection=False, font=("Segoe UI", 9), **kw),
+                             "listbox")
             lb.pack(side="left", fill="both", expand=True)
-            sb = tk.Scrollbar(frame, command=lb.yview)
+            sb = ttk.Scrollbar(f, orient="vertical", command=lb.yview)
             sb.pack(side="right", fill="y")
             lb.config(yscrollcommand=sb.set)
-            return frame, lb
+            return f, lb
 
         # --- Generale ---------------------------------------------------
         g = tab("Generale")
         g.columnconfigure(1, weight=1)
-        tk.Label(g, text="Scorciatoia ricerca host", **lbl).grid(row=0, column=0, columnspan=2, sticky="w")
-        hk = tk.Frame(g, bg=_C_BG)
+        label(g, "Scorciatoia ricerca host").grid(row=0, column=0, columnspan=2, sticky="w")
+        hk = frame(g)
         hk.grid(row=1, column=0, columnspan=2, sticky="we", pady=(2, 0))
         self._var_hotkey = tk.StringVar()
-        entry = tk.Entry(hk, textvariable=self._var_hotkey, font=("Segoe UI", 11),
-                         relief="solid", bd=1, justify="center", cursor="hand2",
-                         readonlybackground="white", state="readonly")
+        entry = theme.style(tk.Entry(hk, textvariable=self._var_hotkey, font=("Segoe UI", 11),
+                                     justify="center", cursor="hand2", state="readonly"),
+                            "entry")
         entry.pack(side="left", fill="x", expand=True, ipady=3)
         self._hotkey_entry = entry
-        tk.Button(hk, text="Predefinita", command=self._reset_hotkey,
-                  **btn).pack(side="left", padx=(8, 0))
+        button(hk, "Predefinita", self._reset_hotkey).pack(side="left", padx=(8, 0))
         self._var_hotkey_hint = tk.StringVar()
-        tk.Label(g, textvariable=self._var_hotkey_hint, **hint).grid(
+        hint(g, textvariable=self._var_hotkey_hint).grid(
             row=2, column=0, columnspan=2, sticky="w", pady=(2, 12))
         entry.bind("<FocusIn>", self._capture_start)
         entry.bind("<FocusOut>", self._capture_end)
@@ -174,119 +186,121 @@ class SettingsDialog:
         entry.bind("<KeyRelease>", self._on_key_release)
 
         lo, hi = LIMITS["keepalive_interval"]
-        tk.Label(g, text="Intervallo keepalive (secondi)", **lbl).grid(row=3, column=0, sticky="w")
+        label(g, "Intervallo keepalive (secondi)").grid(row=3, column=0, sticky="w")
         self._var_keepalive = tk.StringVar()
-        tk.Spinbox(g, from_=lo, to=hi, increment=30, width=7,
-                   textvariable=self._var_keepalive).grid(row=3, column=1, sticky="w", padx=8)
+        theme.style(tk.Spinbox(g, from_=lo, to=hi, increment=30, width=7,
+                               textvariable=self._var_keepalive), "spinbox").grid(
+                                   row=3, column=1, sticky="w", padx=8)
 
         lo, hi = LIMITS["tunnel_timeout"]
-        tk.Label(g, text="Timeout attesa tunnel (secondi)", **lbl).grid(row=4, column=0, sticky="w", pady=(6, 0))
+        label(g, "Timeout attesa tunnel (secondi)").grid(row=4, column=0, sticky="w", pady=(6, 0))
         self._var_tunnel = tk.StringVar()
-        tk.Spinbox(g, from_=lo, to=hi, increment=10, width=7,
-                   textvariable=self._var_tunnel).grid(row=4, column=1, sticky="w", padx=8, pady=(6, 0))
-        tk.Label(g, text="Keepalive e timeout valgono dalla prossima connessione aperta.",
-                 **hint).grid(row=5, column=0, columnspan=2, sticky="w", pady=(2, 12))
+        theme.style(tk.Spinbox(g, from_=lo, to=hi, increment=10, width=7,
+                               textvariable=self._var_tunnel), "spinbox").grid(
+                                   row=4, column=1, sticky="w", padx=8, pady=(6, 0))
+        hint(g, "Keepalive e timeout valgono dalla prossima connessione aperta.").grid(
+            row=5, column=0, columnspan=2, sticky="w", pady=(2, 12))
 
         self._var_autostart = tk.BooleanVar()
-        tk.Checkbutton(g, text="Avvia automaticamente con Windows",
-                       variable=self._var_autostart, **chk).grid(row=6, column=0, columnspan=2, sticky="w")
+        check(g, "Avvia automaticamente con Windows", self._var_autostart).grid(
+            row=6, column=0, columnspan=2, sticky="w")
         self._var_autostart_hint = tk.StringVar()
-        tk.Label(g, textvariable=self._var_autostart_hint, justify="left", wraplength=400,
-                 **hint).grid(row=7, column=0, columnspan=2, sticky="w")
+        hint(g, textvariable=self._var_autostart_hint, justify="left",
+             wraplength=px(400)).grid(row=7, column=0, columnspan=2, sticky="w")
 
-        tk.Label(g, text="Tema delle console PROD", **lbl).grid(row=8, column=0, sticky="w", pady=(12, 0))
+        self._var_dark = tk.BooleanVar()
+        check(g, "Tema scuro (One Half Dark)", self._var_dark).grid(
+            row=8, column=0, columnspan=2, sticky="w", pady=(12, 0))
+        hint(g, "Per le finestre Cerca host, Cerca file e Impostazioni; si applica al "
+                "salvataggio.", justify="left", wraplength=px(420)).grid(
+                    row=9, column=0, columnspan=2, sticky="w")
+
+        label(g, "Tema delle console PROD").grid(row=10, column=0, sticky="w", pady=(12, 0))
         self._var_prod_theme = tk.StringVar()
-        self._prod_theme_combo = ttk.Combobox(g, textvariable=self._var_prod_theme,
-                                              state="readonly", width=24)
-        self._prod_theme_combo.grid(row=8, column=1, sticky="w", padx=8, pady=(12, 0))
-        tk.Label(g, text="Schema colori applicato ai terminali PROD (anche quelli definiti in "
-                         "Windows Terminal). Tutte le console hanno il titolo [TEST]/[PROD] host.",
-                 justify="left", wraplength=420, **hint).grid(row=9, column=0, columnspan=2, sticky="w")
-
-        # --- Notifiche --------------------------------------------------
-        n = tab("Notifiche")
-        tk.Label(n, text="Mostra una notifica per:", **lbl).pack(anchor="w", pady=(0, 4))
-        self._notif_vars = {}
-        for kind, label in NOTIFICATION_KINDS.items():
-            v = tk.BooleanVar()
-            self._notif_vars[kind] = v
-            tk.Checkbutton(n, text=label, variable=v, **chk).pack(anchor="w", fill="x")
+        self._prod_theme_combo = theme.style(
+            ttk.Combobox(g, textvariable=self._var_prod_theme, state="readonly", width=24),
+            "combo")
+        self._prod_theme_combo.grid(row=10, column=1, sticky="w", padx=8, pady=(12, 0))
+        hint(g, "Schema colori applicato ai terminali PROD (anche quelli definiti in "
+                "Windows Terminal). Tutte le console hanno il titolo [TEST]/[PROD] host.",
+             justify="left", wraplength=px(420)).grid(row=11, column=0, columnspan=2, sticky="w")
 
         # --- Preferiti --------------------------------------------------
         f = tab("Preferiti")
-        row = tk.Frame(f, bg=_C_BG)
+        row = frame(f)
         row.pack(fill="x")
-        tk.Label(row, text="Filtra host", **lbl).pack(side="left")
+        label(row, "Filtra host").pack(side="left")
         self._var_fav_filter = tk.StringVar()
-        tk.Entry(row, textvariable=self._var_fav_filter, relief="solid", bd=1,
-                 font=("Segoe UI", 9)).pack(side="right", fill="x", expand=True, padx=(12, 0))
+        theme.style(tk.Entry(row, textvariable=self._var_fav_filter, font=("Segoe UI", 9)),
+                    "entry").pack(side="right", fill="x", expand=True, padx=(12, 0))
         self._var_fav_filter.trace_add("write", lambda *_: self._refresh_hosts())
-        frame, self._hosts_list = listbox(f, 7)
-        frame.pack(fill="both", expand=True, pady=(4, 4))
+        lframe, self._hosts_list = listbox(f, 7)
+        lframe.pack(fill="both", expand=True, pady=(4, 4))
         self._hosts_list.bind("<Double-Button-1>", lambda e: self._add_favorite())
 
-        actions = tk.Frame(f, bg=_C_BG)
+        actions = frame(f)
         actions.pack(fill="x")
-        tk.Button(actions, text="Aggiungi ai preferiti  ↓", command=self._add_favorite,
-                  bg="#2b6cb0", fg="white", activebackground="#245a93",
-                  activeforeground="white", relief="flat", font=("Segoe UI", 9, "bold"),
-                  cursor="hand2").pack(side="left")
+        button(actions, "Aggiungi ai preferiti  ↓", self._add_favorite, "primary",
+               bold=True).pack(side="left")
 
-        tk.Label(f, text="Preferiti (in cima al menu e alla ricerca, in quest'ordine)",
-                 **lbl).pack(anchor="w", pady=(10, 0))
-        favrow = tk.Frame(f, bg=_C_BG)
+        label(f, "Preferiti (in cima al menu e alla ricerca, in quest'ordine)").pack(
+            anchor="w", pady=(10, 0))
+        favrow = frame(f)
         favrow.pack(fill="both", expand=True, pady=(4, 4))
-        frame, self._fav_list = listbox(favrow, 5)
-        frame.pack(side="left", fill="both", expand=True)
+        lframe, self._fav_list = listbox(favrow, 5)
+        lframe.pack(side="left", fill="both", expand=True)
         self._fav_list.bind("<Double-Button-1>", lambda e: self._remove_favorite())
-        side = tk.Frame(favrow, bg=_C_BG)
+        side = frame(favrow)
         side.pack(side="left", fill="y", padx=(8, 0))
         for text, cmd in (("Rimuovi", self._remove_favorite),
                           ("Su", lambda: self._move_favorite(-1)),
                           ("Giù", lambda: self._move_favorite(1))):
-            tk.Button(side, text=text, command=cmd, width=9, **btn).pack(pady=(0, 4))
+            button(side, text, cmd, width=9).pack(pady=(0, 4))
 
-        rec = tk.Frame(f, bg=_C_BG)
+        rec = frame(f)
         rec.pack(fill="x")
         self._var_recents = tk.StringVar()
-        tk.Label(rec, textvariable=self._var_recents, **hint).pack(side="left")
-        tk.Button(rec, text="Svuota recenti", command=self._clear_recents,
-                  **btn).pack(side="right")
+        hint(rec, textvariable=self._var_recents).pack(side="left")
+        button(rec, "Svuota recenti", self._clear_recents).pack(side="right")
+
+        # --- Notifiche --------------------------------------------------
+        n = tab("Notifiche")
+        label(n, "Mostra una notifica per:").pack(anchor="w", pady=(0, 4))
+        self._notif_vars = {}
+        for kind, text in NOTIFICATION_KINDS.items():
+            v = tk.BooleanVar()
+            self._notif_vars[kind] = v
+            check(n, text, v).pack(anchor="w", fill="x")
 
         # --- Info -------------------------------------------------------
         i = tab("Info")
-        tk.Label(i, text=f"SSH Connection Manager  v{self._version}",
-                 bg=_C_BG, fg=_C_TEXT, font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        theme.style(tk.Label(i, text=f"SSH Connection Manager  v{self._version}",
+                             font=("Segoe UI", 11, "bold")), "label").pack(anchor="w")
         for title, path in (("Config SSH", self._ssh_config_path),
                             ("Utente e password", ConfigLoader.maven_settings_path()),
                             ("Preferenze", AppSettings.path),
                             ("Log", LOG_FILE)):
-            tk.Label(i, text=f"{title}:  {path}", **hint).pack(anchor="w", pady=(6, 0))
-        links = tk.Frame(i, bg=_C_BG)
+            hint(i, f"{title}:  {path}").pack(anchor="w", pady=(6, 0))
+        links = frame(i)
         links.pack(anchor="w", pady=(12, 0))
-        tk.Button(links, text="Apri utente e password", command=self._open_credentials,
-                  **btn).pack(side="left")
-        tk.Button(links, text="Apri config SSH",
-                  command=lambda: self._open(self._ssh_config_path), **btn).pack(side="left", padx=8)
-        tk.Button(links, text="Apri log", command=lambda: self._open(LOG_FILE),
-                  **btn).pack(side="left")
+        button(links, "Apri utente e password", self._open_credentials).pack(side="left")
+        button(links, "Apri config SSH",
+               lambda: self._open(self._ssh_config_path)).pack(side="left", padx=8)
+        button(links, "Apri log", lambda: self._open(LOG_FILE)).pack(side="left")
         self._var_info = tk.StringVar()
-        tk.Label(i, textvariable=self._var_info, justify="left", wraplength=420,
-                 **hint).pack(anchor="w", pady=(10, 0))
+        hint(i, textvariable=self._var_info, justify="left",
+             wraplength=px(420)).pack(anchor="w", pady=(10, 0))
 
         # --- footer -----------------------------------------------------
         self._var_error = tk.StringVar()
-        tk.Label(top, textvariable=self._var_error, bg=_C_BG, fg="#c0392b",
-                 font=("Segoe UI", 8), anchor="w", wraplength=440).pack(fill="x", padx=18, pady=(6, 0))
-        btns = tk.Frame(top, bg=_C_BG)
+        label(top, textvariable=self._var_error, role="error", size=8, anchor="w",
+              wraplength=px(440)).pack(fill="x", padx=18, pady=(6, 0))
+        btns = frame(top)
         btns.pack(fill="x", padx=16, pady=10)
-        tk.Button(btns, text="Salva", command=self._save, bg="#2ea043", fg="white",
-                  relief="flat", font=("Segoe UI", 9, "bold"), width=12,
-                  activebackground="#278a39", activeforeground="white",
-                  cursor="hand2").pack(side="right")
-        tk.Button(btns, text="Annulla", command=self._hide, relief="flat",
-                  bg="#dfe4ea", font=("Segoe UI", 9), width=12,
-                  cursor="hand2").pack(side="right", padx=(0, 8))
+        button(btns, "Salva", self._save, "success", bold=True, width=12).pack(side="right")
+        button(btns, "Annulla", self._hide, width=12).pack(side="right", padx=(0, 8))
+        # The favorites placeholder row has its own colours.
+        theme.on_change(lambda: self._refresh_favorites())
         top.update_idletasks()
 
     def _load_values(self) -> None:
@@ -298,11 +312,12 @@ class SettingsDialog:
         self._var_autostart.set(autostart.is_enabled())
         self._var_autostart_hint.set(autostart.describe())
         names = console_themes.scheme_names()
-        theme = cfg["prod_console_theme"]
-        if theme not in names:
-            names.append(theme)       # keep a saved scheme even if WT dropped it
+        scheme = cfg["prod_console_theme"]
+        if scheme not in names:
+            names.append(scheme)      # keep a saved scheme even if WT dropped it
         self._prod_theme_combo["values"] = names
-        self._var_prod_theme.set(theme)
+        self._var_prod_theme.set(scheme)
+        self._var_dark.set(cfg["dark_theme"])
         for kind, v in self._notif_vars.items():
             v.set(cfg["notifications"].get(kind, True))
 
@@ -328,7 +343,7 @@ class SettingsDialog:
         self._build()
         self._load_values()
         top = self._top
-        w, h = 500, 610
+        w, h = px(500), px(640)
         x = (top.winfo_screenwidth() - w) // 2
         y = max(40, (top.winfo_screenheight() - h) // 3)
         top.geometry(f"{w}x{h}+{x}+{y}")
@@ -436,7 +451,8 @@ class SettingsDialog:
             lb.insert("end", f"  {h}   ({env})" if env else f"  {h}   (non più nel config)")
         if not self._favorites:
             lb.insert("end", "  Nessun preferito: seleziona un host sopra e premi Aggiungi")
-            lb.itemconfig(0, fg=_C_MUTED, selectforeground=_C_MUTED, selectbackground="white")
+            muted, field = theme.color("muted"), theme.color("field")
+            lb.itemconfig(0, fg=muted, selectforeground=muted, selectbackground=field)
         elif select is not None:
             select = max(0, min(select, len(self._favorites) - 1))
             lb.selection_set(select)
@@ -541,6 +557,7 @@ class SettingsDialog:
         values["favorites"] = list(self._favorites)
         values["autostart"] = self._var_autostart.get()
         values["prod_console_theme"] = self._var_prod_theme.get() or console_themes.NO_THEME
+        values["dark_theme"] = self._var_dark.get()
         return values, None
 
     def _save(self) -> None:

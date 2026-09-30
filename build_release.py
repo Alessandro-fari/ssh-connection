@@ -85,6 +85,7 @@ def build_exe():
         "--hiddenimport", "ssh_connection.gui.win32_menu_bitmaps",
         "--hiddenimport", "ssh_connection.gui.hotkey_manager",
         "--hiddenimport", "ssh_connection.gui.search_dialog",
+        "--hiddenimport", "ssh_connection.gui.theme",
         "--hiddenimport", "ssh_connection.ssh.ssh_config_parser",
         "--hiddenimport", "ssh_connection.ssh.ssh_launcher",
         "--hiddenimport", "ssh_connection.ssh.console_injector",

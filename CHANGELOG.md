@@ -26,6 +26,8 @@ annotati nella voce stessa. Formato ispirato a [Keep a Changelog](https://keepac
     la ricerca pre-filtrata, che l'hotkey globale non fa.
 
 ### Modificato
+- **2026-09-30** — Scheda **Notifiche** spostata dopo **Preferiti** (ordine: Generale,
+  Preferiti, Notifiche, Info): i preferiti si usano più spesso delle notifiche.
 - **2026-09-28** — **"Apri utente e password" nella scheda Info** delle Impostazioni.
   Apre in Blocco note `~/.m2/settings.xml`, da cui l'app legge nome utente e password
   (primo `<server>`). Se il file non esiste lo crea da un modello con i segnaposto
@@ -88,7 +90,44 @@ annotati nella voce stessa. Formato ispirato a [Keep a Changelog](https://keepac
   - Test di regressione sulla presenza di `-L`. Il test locale con `sh` non può creare
     link simbolici veri su Windows senza privilegi.
 
+### Corretto
+- **2026-09-30** — **Finestre sfocate** su schermi con ridimensionamento (es. 125%). Il
+  processo non dichiarava la *DPI awareness*: Windows disegnava le finestre Tk a 96 DPI e
+  le ingrandiva come bitmap, con testo impastato. Ora `main.py` chiama
+  `theme.enable_dpi_awareness()` prima di creare qualsiasi finestra (anche il messaggio di
+  avvio e la tray): `SetProcessDpiAwarenessContext(SYSTEM_AWARE)`, con fallback
+  `SetProcessDpiAwareness(1)` / `SetProcessDPIAware()`.
+  - *System aware* e non per-monitor: Tk 8.6 non gestisce `WM_DPICHANGED`, così su un
+    monitor con DPI diverso ci pensa ancora Windows.
+  - Tk scala da sé i font (in punti), non le misure in pixel: geometrie, larghezze fisse,
+    `wraplength`, altezza della banda e righe del Treeview passano da `theme.px()`
+    (fattore = DPI / 96). Impostazioni un po' più alta (640 px logici) per la nuova voce.
+  - Anche il menu tray e le sue icone di stato (`SM_CXMENUCHECK`) sono ora nitidi.
+
 ### Aggiunto
+- **2026-09-30** — **Tema scuro One Half Dark** per le finestre dell'app (Cerca host,
+  Cerca file, Impostazioni), attivabile in *Impostazioni → Generale → "Tema scuro (One
+  Half Dark)"* (preferenza `dark_theme`, default spento). Palette dello schema One Half
+  Dark di Windows Terminal (sfondo `#282c34`, testo `#dcdfe4`, accento blu `#61afef`,
+  verde/giallo/rosso per TEST/PROD/errori). Il font resta Segoe UI in entrambi i temi.
+  - Si applica al salvataggio, senza riavvio: tutte le finestre aperte vengono ridipinte,
+    barra del titolo compresa (`DwmSetWindowAttribute`, dark mode immersiva).
+  - *Come*: nuovo modulo `gui/theme.py`. I widget non ricevono più colori fissi ma un
+    **ruolo** (`theme.style(w, "button")`); `theme.use(dark)` riapplica la palette a tutti.
+    I colori che dipendono dallo stato (stato in errore, pulsante Interrompi, etichetta
+    TEST/PROD) cambiano ruolo con `set_role`. Le costanti `_C_*` di `search_dialog.py` e
+    `file_search_dialog.py` sono state rimosse.
+  - I widget ttk usano il tema nativo `vista` in chiaro (aspetto invariato) e `clam` in
+    scuro, l'unico che accetta colori. Le `tk.Scrollbar` (native, non colorabili) sono
+    diventate `ttk.Scrollbar`; il bordo di campi e liste è ora un `highlight` di 1 px
+    (grigio, blu sul campo col focus) al posto del `relief="solid"` nero.
+  - La lista a tendina delle combobox è creata una volta sola da ttk: viene ricolorata
+    esplicitamente (`ttk::combobox::PopdownWindow`).
+  - Non toccati: menu tray (nativo Windows), dialog di sistema (Salva con nome, conferme),
+    dialog del token Init (WinForms) e schema colori delle console PROD.
+  - Test: in `test_theme_file_search.py` il cambio tema a finestra aperta ridipinge sfondo,
+    stato in errore e righe separatore, in entrambe le direzioni. `ssh_connection.gui.theme`
+    aggiunto agli hidden import di `build_release.py` / `build_debug.py` e degli spec.
 - **2026-09-30** — **"Cerca file": navigazione delle cartelle come WinSCP** (richiesta
   d'uso: con la sola ricerca non si vedevano cartelle e percorsi). La lista mostra la
   cartella corrente: prima le cartelle, poi i file, con `..` in cima; i link simbolici

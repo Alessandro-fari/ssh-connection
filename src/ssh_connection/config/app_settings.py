@@ -19,6 +19,7 @@ Keys (all optional in the file; defaults below):
                       see ssh.console_themes
   file_search_paths   {host: [path, ...]} — remote folders used in the file
                       search window, most recent first (MAX_FILE_PATHS)
+  dark_theme          bool — One Half Dark theme for the app windows
 """
 
 import json
@@ -51,6 +52,7 @@ DEFAULTS: Dict[str, Any] = {
     "recents": [],
     "prod_console_theme": "Ubuntu-ColorScheme",
     "file_search_paths": {},
+    "dark_theme": False,
 }
 
 # (min, max) accepted for the numeric settings
@@ -141,6 +143,8 @@ class AppSettings:
             return value if value in ("Tutti", "TEST", "PROD") else default
         if key in ("hotkey", "prod_console_theme"):
             return value if isinstance(value, str) and value else default
+        if key == "dark_theme":
+            return value if isinstance(value, bool) else default
         if key == "file_search_paths":
             if not isinstance(value, dict):
                 return {}

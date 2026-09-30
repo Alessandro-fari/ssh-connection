@@ -44,18 +44,10 @@ import threading
 from typing import Callable, List, Optional, Sequence, Tuple
 
 from ..config.app_settings import AppSettings
+from . import theme
+from .theme import px
 
 _ENVS = ("Tutti", "TEST", "PROD")
-
-# --- palette (kept in sync with the tray menu bitmaps) ------------------
-_C_BG = "#f4f6f9"
-_C_HEADER = "#2b6cb0"
-_C_TEXT = "#1e1e1e"
-_C_MUTED = "#5a6b7b"
-_C_SEP_BG = "#e6eaf0"
-_C_SEL_BG = "#2b6cb0"
-_C_SEL_FG = "#ffffff"
-
 
 _STAR = "★"
 
@@ -154,14 +146,16 @@ def build_host_rows(envs: Sequence[Tuple[str, List[str]]], favorites: Sequence[s
 
 def fill_host_listbox(listbox, rows: List[dict], favorites: Sequence[str]) -> None:
     """Show `rows` in a tk.Listbox: separators greyed and visually
-    unselectable, favorites starred, quick-access rows tagged with the env."""
+    unselectable, favorites starred, quick-access rows tagged with the env.
+    Separator colours come from the current theme: refill after a switch."""
     favs = set(favorites)
+    sep_bg, muted = theme.color("sep_bg"), theme.color("muted")
     listbox.delete(0, "end")
     for i, r in enumerate(rows):
         if r["type"] == "sep":
             listbox.insert("end", "  " + r["label"])
-            listbox.itemconfig(i, bg=_C_SEP_BG, fg=_C_MUTED,
-                               selectbackground=_C_SEP_BG, selectforeground=_C_MUTED)
+            listbox.itemconfig(i, bg=sep_bg, fg=muted,
+                               selectbackground=sep_bg, selectforeground=muted)
         else:
             mark = _STAR + " " if r["host"] in favs else "   "
             tag = f"   ({r['env']})" if r["tagged"] else ""
@@ -259,7 +253,7 @@ class SearchPopup:
             root = tk.Tk()
             self._root = root
             root.title("SSH Connection Manager - Cerca host")
-            root.configure(bg=_C_BG)
+            theme.init(root, dark=AppSettings.get("dark_theme"))
             root.resizable(False, False)
             root.attributes("-topmost", True)
             root.withdraw()                      # stay hidden until show()
@@ -268,19 +262,19 @@ class SearchPopup:
             root.protocol("WM_DELETE_WINDOW", self._hide)
 
             # --- header band -------------------------------------------
-            band = tk.Frame(root, bg=_C_HEADER, height=48)
+            band = theme.style(tk.Frame(root, height=px(48)), "header")
             band.pack(fill="x")
             band.pack_propagate(False)
-            tk.Label(band, text="Cerca host", bg=_C_HEADER, fg="white",
-                     font=("Segoe UI", 14, "bold")).pack(side="left", padx=20)
+            theme.style(tk.Label(band, text="Cerca host", font=("Segoe UI", 14, "bold")),
+                        "header_title").pack(side="left", padx=20)
 
             # --- filter row --------------------------------------------
-            row = tk.Frame(root, bg=_C_BG)
+            row = theme.style(tk.Frame(root), "window")
             row.pack(fill="x", padx=20, pady=(12, 8))
 
             self._var_filter = tk.StringVar()
-            entry = tk.Entry(row, textvariable=self._var_filter,
-                             font=("Segoe UI", 12), relief="solid", bd=1)
+            entry = theme.style(tk.Entry(row, textvariable=self._var_filter,
+                                         font=("Segoe UI", 12)), "entry")
             entry.pack(side="left", fill="x", expand=True, ipady=4)
             self._entry = entry
 
@@ -288,39 +282,35 @@ class SearchPopup:
             combo = ttk.Combobox(row, textvariable=self._var_env,
                                  values=list(_ENVS), state="readonly",
                                  width=7, font=("Segoe UI", 10))
+            theme.style(combo, "combo")
             combo.pack(side="left", padx=(8, 0))
             self._combo = combo
 
             # --- results listbox ---------------------------------------
-            body = tk.Frame(root, bg=_C_BG)
+            body = theme.style(tk.Frame(root), "window")
             body.pack(fill="both", expand=True, padx=20)
-            listbox = tk.Listbox(body, font=("Segoe UI", 10), activestyle="none",
-                                 height=12, relief="solid", bd=1,
-                                 highlightthickness=0, exportselection=False,
-                                 selectbackground=_C_SEL_BG,
-                                 selectforeground=_C_SEL_FG, fg=_C_TEXT)
+            listbox = theme.style(tk.Listbox(body, font=("Segoe UI", 10), activestyle="none",
+                                             height=12, exportselection=False), "listbox")
             listbox.pack(side="left", fill="both", expand=True)
-            sb = tk.Scrollbar(body, command=listbox.yview)
+            sb = ttk.Scrollbar(body, orient="vertical", command=listbox.yview)
             sb.pack(side="right", fill="y")
             listbox.config(yscrollcommand=sb.set)
             self._list = listbox
 
             self._var_status = tk.StringVar(value="")
-            tk.Label(root, textvariable=self._var_status, bg=_C_BG, fg=_C_MUTED,
-                     font=("Segoe UI", 8), anchor="w").pack(
+            theme.style(tk.Label(root, textvariable=self._var_status,
+                                 font=("Segoe UI", 8), anchor="w"), "hint").pack(
                          fill="x", padx=22, pady=(4, 0))
 
             # --- buttons -----------------------------------------------
-            btns = tk.Frame(root, bg=_C_BG)
+            btns = theme.style(tk.Frame(root), "window")
             btns.pack(fill="x", padx=20, pady=10)
-            tk.Button(btns, text="Connetti", command=self._confirm,
-                      bg="#2ea043", fg="white", relief="flat",
-                      font=("Segoe UI", 9, "bold"), width=12,
-                      activebackground="#278a39", activeforeground="white",
-                      cursor="hand2").pack(side="right")
-            tk.Button(btns, text="Annulla", command=self._hide, relief="flat",
-                      bg="#dfe4ea", font=("Segoe UI", 9), width=12,
-                      cursor="hand2").pack(side="right", padx=(0, 8))
+            theme.style(tk.Button(btns, text="Connetti", command=self._confirm, relief="flat",
+                                  font=("Segoe UI", 9, "bold"), width=12, cursor="hand2"),
+                        "success").pack(side="right")
+            theme.style(tk.Button(btns, text="Annulla", command=self._hide, relief="flat",
+                                  font=("Segoe UI", 9), width=12, cursor="hand2"),
+                        "button").pack(side="right", padx=(0, 8))
 
             # --- bindings ----------------------------------------------
             # Typing filters live; arrows/Enter/Esc work from the entry so the
@@ -340,6 +330,8 @@ class SearchPopup:
                 w.bind("<Control-F>", lambda e: self._file_search())
             listbox.bind("<Double-Button-1>", lambda e: self._confirm())
             listbox.bind("<<ListboxSelect>>", self._on_click_select)
+            # Separator rows carry their own colours: refill on a theme switch.
+            theme.on_change(lambda: self._refresh(keep_host=self._current_host()))
 
             root.update_idletasks()
             self._ready.set()
@@ -420,7 +412,7 @@ class SearchPopup:
 
     def _center(self) -> None:
         root = self._root
-        w, h = 480, 430
+        w, h = px(480), px(430)
         sw = root.winfo_screenwidth()
         sh = root.winfo_screenheight()
         x = (sw - w) // 2
@@ -485,6 +477,10 @@ class SearchPopup:
         sel = self._list.curselection()
         return sel[0] if sel else -1
 
+    def _current_host(self) -> Optional[str]:
+        idx = self._current()
+        return self._rows[idx]["host"] if 0 <= idx < len(self._rows) else None
+
     def _move(self, delta: int) -> str:
         """Move the selection by `delta` host rows, skipping separators."""
         if not self._rows:
@@ -543,6 +539,7 @@ if __name__ == "__main__":  # pragma: no cover
     import time
 
     logging.basicConfig(level=logging.DEBUG)
+    theme.enable_dpi_awareness()
     _demo = [("TEST", ["login_test", "stlit1tf01", "stlit1tf02", "app_test"]),
              ("PROD", ["login_prod", "stlit1pf01", "db_prod", "app_prod"])]
     _p = SearchPopup(host_provider=lambda: _demo,

@@ -55,9 +55,10 @@ from typing import Callable, List, Optional, Sequence, Tuple
 from ..config.app_settings import AppSettings
 from ..ssh.remote_files import (MAX_RESULTS, RemoteError, RemoteFile, RemoteSession, glob_for,
                                 is_supported_host, parent_path, route_ready)
-from .search_dialog import (_C_BG, _C_HEADER, _C_MUTED, _C_SEL_BG, _C_SEL_FG, _C_TEXT, _ENVS,
-                            _force_foreground, build_host_rows, fill_host_listbox,
+from . import theme
+from .search_dialog import (_ENVS, _force_foreground, build_host_rows, fill_host_listbox,
                             next_host_row)
+from .theme import px
 
 # Files opened with "Apri" are downloaded here first.
 OPEN_DIR = Path(tempfile.gettempdir()) / "SSH-Connection-Manager"
@@ -75,10 +76,6 @@ BINARY_EXTENSIONS = {".gz", ".tgz", ".zip", ".tar", ".bz2", ".xz", ".7z", ".jar"
 AUTO_LIST_DELAY_MS = 400
 
 UP_IID = "up"
-
-_C_PROD = "#b7791f"
-_C_TEST = "#2f855a"
-_C_ERROR = "#c0392b"
 
 
 def format_size(n: int) -> str:
@@ -199,56 +196,63 @@ class FileSearchDialog:
         top = tk.Toplevel(self._ui.root)
         self._top = top
         top.title("SSH Connection Manager - Cerca file")
-        top.configure(bg=_C_BG)
-        top.minsize(820, 500)
+        theme.toplevel(top)
+        top.minsize(px(820), px(500))
         top.withdraw()
         top.protocol("WM_DELETE_WINDOW", self._hide)
         top.bind("<Escape>", lambda e: self._hide())
         self._icon_folder, self._icon_file = _make_icons(tk)
 
-        band = tk.Frame(top, bg=_C_HEADER, height=48)
+        def frame(parent, role="window", **kw):
+            return theme.style(tk.Frame(parent, **kw), role)
+
+        def label(parent, text="", role="label", size=9, **kw):
+            return theme.style(tk.Label(parent, text=text, font=("Segoe UI", size), **kw), role)
+
+        def entry(parent, var, size=10):
+            return theme.style(tk.Entry(parent, textvariable=var, font=("Segoe UI", size)), "entry")
+
+        def button(parent, text, command, role="button", size=9, bold=False, **kw):
+            font = ("Segoe UI", size, "bold") if bold else ("Segoe UI", size)
+            return theme.style(tk.Button(parent, text=text, command=command, relief="flat",
+                                         font=font, cursor="hand2", **kw), role)
+
+        band = frame(top, "header", height=px(48))
         band.pack(fill="x")
         band.pack_propagate(False)
-        tk.Label(band, text="Cerca file", bg=_C_HEADER, fg="white",
-                 font=("Segoe UI", 14, "bold")).pack(side="left", padx=20)
+        theme.style(tk.Label(band, text="Cerca file", font=("Segoe UI", 14, "bold")),
+                    "header_title").pack(side="left", padx=20)
 
-        lbl = dict(bg=_C_BG, fg=_C_TEXT, font=("Segoe UI", 9))
-        btn = dict(relief="flat", bg="#dfe4ea", font=("Segoe UI", 9), cursor="hand2")
-        nav = dict(relief="flat", bg="#dfe4ea", font=("Segoe UI", 10), cursor="hand2", width=3)
-
-        body = tk.Frame(top, bg=_C_BG)
+        body = frame(top)
         body.pack(fill="both", expand=True, padx=16, pady=(12, 0))
 
         # --- host panel (left): same list as the host popup ---------------
-        left = tk.Frame(body, bg=_C_BG, width=250)
+        left = frame(body, width=px(250))
         left.pack(side="left", fill="y")
         left.pack_propagate(False)
-        tk.Label(left, text="Host", **lbl).pack(anchor="w")
-        frow = tk.Frame(left, bg=_C_BG)
+        label(left, "Host").pack(anchor="w")
+        frow = frame(left)
         frow.pack(fill="x", pady=(2, 4))
         self._var_host_filter = tk.StringVar()
-        host_entry = tk.Entry(frow, textvariable=self._var_host_filter, relief="solid", bd=1,
-                              font=("Segoe UI", 10))
+        host_entry = entry(frow, self._var_host_filter)
         host_entry.pack(side="left", fill="x", expand=True, ipady=2)
         self._host_entry = host_entry
         self._var_env = tk.StringVar(value="Tutti")
-        env_combo = ttk.Combobox(frow, textvariable=self._var_env, values=list(_ENVS),
-                                 state="readonly", width=6)
+        env_combo = theme.style(ttk.Combobox(frow, textvariable=self._var_env, values=list(_ENVS),
+                                             state="readonly", width=6), "combo")
         env_combo.pack(side="left", padx=(6, 0))
         self._env_combo = env_combo
-        lframe = tk.Frame(left, bg=_C_BG)
+        lframe = frame(left)
         lframe.pack(fill="both", expand=True)
-        host_list = tk.Listbox(lframe, activestyle="none", exportselection=False,
-                               relief="solid", bd=1, highlightthickness=0,
-                               font=("Segoe UI", 9), fg=_C_TEXT,
-                               selectbackground=_C_SEL_BG, selectforeground=_C_SEL_FG)
+        host_list = theme.style(tk.Listbox(lframe, activestyle="none", exportselection=False,
+                                           font=("Segoe UI", 9)), "listbox")
         host_list.pack(side="left", fill="both", expand=True)
-        hsb = tk.Scrollbar(lframe, command=host_list.yview)
+        hsb = ttk.Scrollbar(lframe, orient="vertical", command=host_list.yview)
         hsb.pack(side="right", fill="y")
         host_list.config(yscrollcommand=hsb.set)
         self._host_list = host_list
-        tk.Label(left, text="Scrivi per filtrare  -  ↑↓ scegli  -  Ctrl+D preferito",
-                 bg=_C_BG, fg=_C_MUTED, font=("Segoe UI", 8)).pack(anchor="w", pady=(2, 0))
+        label(left, "Scrivi per filtrare  -  ↑↓ scegli  -  Ctrl+D preferito", "hint",
+              size=8).pack(anchor="w", pady=(2, 0))
 
         self._var_host_filter.trace_add("write", lambda *_: self._on_host_filter())
         env_combo.bind("<<ComboboxSelected>>", lambda e: self._on_env_changed())
@@ -262,89 +266,88 @@ class FileSearchDialog:
             w.bind("<Control-D>", lambda e: self._toggle_favorite())
             # Enter: this host, list its folder now (connecting if needed)
             w.bind("<Return>", lambda e: self._host_confirmed() or "break")
+        # Separator rows carry their own colours: refill on a theme switch.
+        theme.on_change(lambda: self._host_rows is not None and self._refresh_hosts())
 
         # --- right side ----------------------------------------------------
-        right = tk.Frame(body, bg=_C_BG)
+        right = frame(body)
         right.pack(side="left", fill="both", expand=True, padx=(14, 0))
-        hline = tk.Frame(right, bg=_C_BG)
+        hline = frame(right)
         hline.pack(fill="x")
-        self._host_title = tk.Label(hline, text="", bg=_C_BG, fg=_C_TEXT,
-                                    font=("Segoe UI", 12, "bold"))
+        self._host_title = theme.style(tk.Label(hline, text="", font=("Segoe UI", 12, "bold")),
+                                       "label")
         self._host_title.pack(side="left")
-        self._env_label = tk.Label(hline, text="", bg=_C_BG, font=("Segoe UI", 9, "bold"))
+        self._env_label = theme.style(tk.Label(hline, text="", font=("Segoe UI", 9, "bold")),
+                                      "env_test")
         self._env_label.pack(side="left", padx=10)
 
         # path bar: back / up / home / path / refresh
-        pbar = tk.Frame(right, bg=_C_BG)
+        pbar = frame(right)
         pbar.pack(fill="x", pady=(6, 4))
         self._nav_btns = []
         for text, cmd in (("◀", self._go_back), ("▲", self._go_up), ("⌂", self._go_home)):
-            b = tk.Button(pbar, text=text, command=cmd, **nav)
+            b = button(pbar, text, cmd, size=10, width=3)
             b.pack(side="left", padx=(0, 4))
             self._nav_btns.append(b)
         self._var_path = tk.StringVar()
-        path_combo = ttk.Combobox(pbar, textvariable=self._var_path, font=("Segoe UI", 10))
+        path_combo = theme.style(ttk.Combobox(pbar, textvariable=self._var_path,
+                                              font=("Segoe UI", 10)), "combo")
         path_combo.pack(side="left", fill="x", expand=True, padx=(4, 4), ipady=1)
         path_combo.bind("<Return>", lambda e: self._path_entered() or "break")
         path_combo.bind("<<ComboboxSelected>>", lambda e: self._path_entered())
         self._path_combo = path_combo
-        b = tk.Button(pbar, text="⟳", command=self._refresh_folder, **nav)
+        b = button(pbar, "⟳", self._refresh_folder, size=10, width=3)
         b.pack(side="left")
         self._nav_btns.append(b)
 
         # filters + search
-        form = tk.Frame(right, bg=_C_BG)
+        form = frame(right)
         form.pack(fill="x", pady=(2, 2))
         form.columnconfigure(1, weight=1)
         form.columnconfigure(3, weight=1)
-        tk.Label(form, text="Nome", **lbl).grid(row=0, column=0, sticky="w")
+        label(form, "Nome").grid(row=0, column=0, sticky="w")
         self._var_name = tk.StringVar()
-        name_entry = tk.Entry(form, textvariable=self._var_name, relief="solid", bd=1,
-                              font=("Segoe UI", 10))
+        name_entry = entry(form, self._var_name)
         name_entry.grid(row=0, column=1, sticky="we", padx=(6, 0), ipady=2)
         self._name_entry = name_entry
-        tk.Label(form, text="Contiene testo", **lbl).grid(row=0, column=2, sticky="w", padx=(12, 6))
+        label(form, "Contiene testo").grid(row=0, column=2, sticky="w", padx=(12, 6))
         self._var_text = tk.StringVar()
-        text_entry = tk.Entry(form, textvariable=self._var_text, relief="solid", bd=1,
-                              font=("Segoe UI", 10))
+        text_entry = entry(form, self._var_text)
         text_entry.grid(row=0, column=3, sticky="we", ipady=2)
         self._var_recursive = tk.BooleanVar(value=True)
-        tk.Checkbutton(form, text="Sottocartelle", variable=self._var_recursive,
-                       bg=_C_BG, activebackground=_C_BG,
-                       font=("Segoe UI", 9)).grid(row=0, column=4, sticky="w", padx=(8, 0))
-        self._search_btn = tk.Button(form, text="Cerca", command=self._search_or_stop,
-                                     bg="#2b6cb0", fg="white", activebackground="#245a93",
-                                     activeforeground="white", relief="flat", width=11,
-                                     font=("Segoe UI", 9, "bold"), cursor="hand2")
+        theme.style(tk.Checkbutton(form, text="Sottocartelle", variable=self._var_recursive,
+                                   font=("Segoe UI", 9)), "check").grid(
+                                       row=0, column=4, sticky="w", padx=(8, 0))
+        self._search_btn = button(form, "Cerca", self._search_or_stop, "primary",
+                                  width=11, bold=True)
         self._search_btn.grid(row=0, column=5, sticky="ns", padx=(8, 0))
-        tk.Label(form, text="Scrivendo nel Nome filtri la cartella; Invio o Cerca cercano anche "
-                            "nelle sottocartelle. Parte del nome o *.log, app-202?-*.",
-                 bg=_C_BG, fg=_C_MUTED, font=("Segoe UI", 8), anchor="w").grid(
-                     row=1, column=1, columnspan=5, sticky="w", padx=(6, 0))
+        label(form, "Scrivendo nel Nome filtri la cartella; Invio o Cerca cercano anche "
+                    "nelle sottocartelle. Parte del nome o *.log, app-202?-*.",
+              "hint", size=8, anchor="w").grid(row=1, column=1, columnspan=5, sticky="w",
+                                               padx=(6, 0))
         self._var_name.trace_add("write", lambda *_: self._on_name_filter())
         for w in (name_entry, text_entry):
             w.bind("<Return>", lambda e: self._search_or_stop() or "break")
 
         # search-results banner (hidden while browsing)
-        self._banner = tk.Frame(right, bg="#fdf3d7")
+        self._banner = frame(right, "banner")
         self._var_banner = tk.StringVar()
-        tk.Label(self._banner, textvariable=self._var_banner, bg="#fdf3d7", fg=_C_TEXT,
-                 font=("Segoe UI", 9), anchor="w").pack(side="left", padx=8, pady=3)
-        tk.Button(self._banner, text="✕ Torna alla cartella", command=self._back_to_folder,
-                  relief="flat", bg="#f5e2a8", font=("Segoe UI", 9),
-                  cursor="hand2").pack(side="right", padx=4, pady=2)
+        theme.style(tk.Label(self._banner, textvariable=self._var_banner, font=("Segoe UI", 9),
+                             anchor="w"), "banner_label").pack(side="left", padx=8, pady=3)
+        button(self._banner, "✕ Torna alla cartella", self._back_to_folder,
+               "banner_button").pack(side="right", padx=4, pady=2)
 
-        self._tframe = tframe = tk.Frame(right, bg=_C_BG)
+        self._tframe = tframe = frame(right)
         tframe.pack(fill="both", expand=True, pady=(4, 0))
-        tree = ttk.Treeview(tframe, columns=("folder", "size", "mtime"),
-                            show="tree headings", selectmode="browse")
+        tree = theme.style(ttk.Treeview(tframe, columns=("folder", "size", "mtime"),
+                                        show="tree headings", selectmode="browse"), "tree")
         tree.heading("#0", text="Nome", command=lambda: self._sort_by("name"))
-        tree.column("#0", width=280, stretch=True)
+        tree.column("#0", width=px(280), stretch=True)
         for col, title, width, anchor in (("folder", "Cartella", 240, "w"),
                                           ("size", "Dimensione", 90, "e"),
                                           ("mtime", "Modificato", 125, "w")):
             tree.heading(col, text=title, command=lambda c=col: self._sort_by(c))
-            tree.column(col, width=width, anchor=anchor, stretch=(col == "folder"))
+            tree.column(col, width=px(width), anchor=anchor, stretch=(col == "folder"))
         tree.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(tframe, orient="vertical", command=tree.yview)
         sb.pack(side="right", fill="y")
@@ -357,19 +360,19 @@ class FileSearchDialog:
         self._tree = tree
 
         self._var_status = tk.StringVar()
-        self._status_label = tk.Label(top, textvariable=self._var_status, bg=_C_BG, fg=_C_MUTED,
-                                      font=("Segoe UI", 8), anchor="w", justify="left",
-                                      wraplength=940)
+        self._status_label = theme.style(
+            tk.Label(top, textvariable=self._var_status, font=("Segoe UI", 8), anchor="w",
+                     justify="left", wraplength=px(940)), "hint")
         self._status_label.pack(fill="x", padx=18, pady=(6, 0))
 
-        btns = tk.Frame(top, bg=_C_BG)
+        btns = frame(top)
         btns.pack(fill="x", padx=16, pady=10)
-        tk.Button(btns, text="Chiudi", command=self._hide, width=10, **btn).pack(side="right")
+        button(btns, "Chiudi", self._hide, width=10).pack(side="right")
         self._action_btns = []
-        for label, cmd in (("Apri", self._activate), ("Scarica...", self._download),
-                           ("Copia percorso", self._copy_path),
-                           ("Vai alla cartella", self._goto_result_folder)):
-            b = tk.Button(btns, text=label, command=cmd, width=15, **btn)
+        for text, cmd in (("Apri", self._activate), ("Scarica...", self._download),
+                          ("Copia percorso", self._copy_path),
+                          ("Vai alla cartella", self._goto_result_folder)):
+            b = button(btns, text, cmd, width=15)
             b.pack(side="left", padx=(0, 6))
             self._action_btns.append(b)
         self._goto_btn = self._action_btns[-1]
@@ -411,7 +414,7 @@ class FileSearchDialog:
 
         top = self._top
         if not top.winfo_viewable():
-            w, h = 1080, 660
+            w, h = px(1080), px(660)
             x = (top.winfo_screenwidth() - w) // 2
             y = max(40, (top.winfo_screenheight() - h) // 3)
             top.geometry(f"{w}x{h}+{x}+{y}")
@@ -537,7 +540,8 @@ class FileSearchDialog:
             self._session = RemoteSession(host)
         env = self._env_of.get(host, "")
         self._host_title.configure(text=host or "Nessun host")
-        self._env_label.configure(text=env, fg=_C_PROD if env == "PROD" else _C_TEST)
+        self._env_label.configure(text=env)
+        theme.set_role(self._env_label, "env_prod" if env == "PROD" else "env_test")
         history = AppSettings.file_search_paths(host) if host else []
         self._path_combo["values"] = history
         self._var_path.set(history[0] if history else "~")
@@ -575,12 +579,12 @@ class FileSearchDialog:
 
     def _status(self, text: str, error: bool = False) -> None:
         self._var_status.set(text)
-        self._status_label.configure(fg=_C_ERROR if error else _C_MUTED)
+        theme.set_role(self._status_label, "error" if error else "hint")
 
     def _set_busy(self, busy: bool, session: Optional[RemoteSession] = None) -> None:
         self._busy_session = session if busy else None
-        self._search_btn.configure(text="Interrompi" if busy else "Cerca",
-                                   bg="#c05621" if busy else "#2b6cb0")
+        self._search_btn.configure(text="Interrompi" if busy else "Cerca")
+        theme.set_role(self._search_btn, "danger" if busy else "primary")
         for b in self._action_btns + self._nav_btns:
             b.configure(state="disabled" if busy else "normal")
         if not busy:

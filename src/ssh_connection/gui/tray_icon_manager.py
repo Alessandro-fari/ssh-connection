@@ -344,10 +344,13 @@ class TrayIconManager:
         if (want_autostart or autostart.is_enabled()) and not autostart.set_enabled(want_autostart):
             return "Impossibile modificare l'avvio automatico (registro di Windows)."
         AppSettings.update(hotkey=binding, **values)
+        from . import theme
+        theme.use(values.get("dark_theme", False))    # repaints the open windows
         logging.info(f"Settings saved: hotkey={binding}, autostart={want_autostart}, "
                      f"keepalive={values.get('keepalive_interval')}, "
                      f"tunnel_timeout={values.get('tunnel_timeout')}, "
-                     f"notifications={values.get('notifications')}")
+                     f"notifications={values.get('notifications')}, "
+                     f"dark_theme={values.get('dark_theme')}")
         return None
 
     def connect_to_host(self, host: str) -> None:

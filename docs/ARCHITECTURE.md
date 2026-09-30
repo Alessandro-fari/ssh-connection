@@ -338,17 +338,36 @@ delle righe diversamente dal previsto (il dialog di fatto non funzionava).
 ### `gui/settings_dialog.py` — dialog Impostazioni
 `Toplevel` dello stesso root Tk del `SearchPopup`: tutte le chiamate passano da
 `SearchPopup.run_on_ui(fn)`, che mette `fn` sulla coda del thread Tk. Schede
-Generale / Notifiche / Preferiti / Info. La scorciatoia si cattura da un campo
+Generale / Preferiti / Notifiche / Info (in Generale anche il tema scuro, vedi `gui/theme.py`). La scorciatoia si cattura da un campo
 (`binding_from_keys` usa il VK di `event.keycode`, indipendente dal layout) e,
 mentre il campo ha il focus, l'hotkey globale è sospesa tramite il callback
 `hotkey_suspend`. I preferiti si modificano su una copia di lavoro (Aggiungi /
 Rimuovi / Su / Giù) salvata con "Salva". `collect()` valida e restituisce i valori;
 `on_save` (tray) può rifiutarli con un messaggio mostrato nel dialog.
 
+### `gui/theme.py` — tema e DPI delle finestre Tk
+Aspetto comune di popup host, "Cerca file" e Impostazioni (tutti sul thread Tk del
+`SearchPopup`).
+- **DPI**: `enable_dpi_awareness()` è chiamata da `main.py` prima di qualsiasi finestra
+  (*system aware*: Tk 8.6 non gestisce `WM_DPICHANGED`). Senza, Windows ingrandisce le
+  finestre come bitmap e il testo è sfocato. Tk scala i font in punti; le misure in pixel
+  (geometrie, larghezze fisse, `wraplength`, righe Treeview) passano da `px()`, con
+  fattore `winfo_fpixels("1i") / 96` calcolato in `init(root)`.
+- **Temi**: `PALETTES["light"]` (colori originali) e `PALETTES["dark"]` (One Half Dark di
+  Windows Terminal); stesso font. I widget sono registrati con un **ruolo**
+  (`style(widget, role)`, `ROLES` → opzioni Tk dalla palette); `use(dark)` riapplica la
+  palette a tutti, ricolora le tendine delle combobox, la barra del titolo
+  (`DwmSetWindowAttribute`) e chiama i listener `on_change` (le liste host rifanno le righe
+  separatore, che hanno colori propri). Stati dinamici via `set_role` (errore, Interrompi,
+  TEST/PROD).
+- **ttk**: tema nativo (`vista`) in chiaro, `clam` configurato in scuro.
+- La preferenza è `dark_theme` in `AppSettings`; `_apply_settings` della tray chiama
+  `theme.use()` al salvataggio.
+
 ### `config/app_settings.py` e `config/autostart.py`
 - `AppSettings`: preferenze utente in `~/.ssh_connection_prefs.json` (`search_env`,
   `hotkey`, `keepalive_interval`, `tunnel_timeout`, `notifications`, `favorites`,
-  `recents`, `prod_console_theme`, `file_search_paths`), con valori sanificati e limitati, lock e scrittura atomica.
+  `recents`, `prod_console_theme`, `file_search_paths`, `dark_theme`), con valori sanificati e limitati, lock e scrittura atomica.
   `SshLauncher.keepalive_command()`/`tunnel_wait_seconds()` le leggono al momento
   dell'uso.
 - `autostart`: voce `HKCU\...\Run` con `--autostart`; considera anche il

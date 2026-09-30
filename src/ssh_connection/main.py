@@ -43,6 +43,11 @@ class SshConnectionApp:
         )
         
         logging.info("SSH Connection Manager starting...")
+
+        # Before any window (message box, tray, Tk): without it Windows
+        # stretches our 96-DPI windows on a scaled screen and they look blurry.
+        from .gui.theme import enable_dpi_awareness
+        enable_dpi_awareness()
         
         # Hide console window when running as executable (after logging setup)
         if os.name == 'nt' and getattr(sys, 'frozen', False):  # Windows and running as exe
