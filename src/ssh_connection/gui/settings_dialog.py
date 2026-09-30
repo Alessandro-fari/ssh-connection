@@ -1,6 +1,6 @@
 """
-Settings dialog (tkinter), replacing the old "Settings" entry that only
-opened ~/.ssh/config in Notepad (still reachable from the "Info" tab).
+Settings dialog (tkinter), Windows 11 style: navigation pane on the left,
+pages made of "setting cards" on the right, Salva / Annulla at the bottom.
 
 Same pre-warm pattern as the search popup, and actually the SAME Tk
 interpreter: the dialog is a Toplevel of the SearchPopup root, built and
@@ -10,17 +10,22 @@ interpreter with its own mainloop — sharing one thread avoids both issues.
 The window is built hidden at startup; opening it only reloads the values
 and deiconifies it, so it appears instantly. Closing only hides it.
 
+Pages: Generale (hotkey, autostart, keepalive, tunnel timeout), Aspetto
+(dark theme — previewed at once, reverted by Annulla — and the PROD console
+scheme), Host (jump host addresses, add / edit / delete hosts of
+~/.ssh/config through `SshConfigDocument`), Utente e password (fields
+written into ~/.m2/settings.xml), Preferiti, Notifiche, Info.
+
+Nothing is written before "Salva": host edits change an in-memory copy of
+the config (written with a backup in config.bak), the credentials are
+written only when changed, the preferences go to `on_save(values)` — it
+runs on the Tk thread and returns None or an error message (e.g. hotkey
+already taken), which is shown and keeps the dialog open.
+
 Hotkey field: the user clicks it and presses the combination. While it has
 the focus the global hotkey is suspended (`hotkey_suspend(True)`), otherwise
 pressing the current combination would be swallowed by RegisterHotKey and
 open the search popup instead of reaching the field.
-
-Favorites tab: all hosts on top (with a filter), an "Aggiungi" button, and
-the current favorites below with "Rimuovi" / "Su" / "Giù".
-
-Saving calls `on_save(values)` on the Tk thread; it returns None on success
-or an error message (e.g. hotkey already taken by another program), which
-is shown and keeps the dialog open.
 """
 
 import logging
@@ -32,12 +37,18 @@ from ..config import autostart
 from ..config.app_settings import DEFAULTS, LIMITS, NOTIFICATION_KINDS, AppSettings
 from ..config.config_loader import ConfigLoader
 from ..ssh import console_themes
-from .hotkey_manager import KEYS, MODIFIERS, parse_binding
+from ..ssh.ssh_config_editor import ENVS, ConfigError, HostEntry, SshConfigDocument
 from . import theme
+from .hotkey_manager import KEYS, MODIFIERS, parse_binding
 from .search_dialog import _force_foreground
 from .theme import px
 
 LOG_FILE = Path.home() / "ssh_connection_debug.log"
+
+PAGES = (("general", "Generale", "settings"), ("appearance", "Aspetto", "color"),
+         ("hosts", "Host", "host"), ("account", "Utente e password", "account"),
+         ("favorites", "Preferiti", "star"), ("notifications", "Notifiche", "bell"),
+         ("info", "Info", "info"))
 
 # Tk keysym of a modifier key -> our modifier name
 _MOD_KEYSYMS = {
@@ -47,6 +58,7 @@ _MOD_KEYSYMS = {
     "Win_L": "Win", "Win_R": "Win",
 }
 
+_HOTKEY_HINT = "Clicca il campo e premi la combinazione (es. Ctrl+Shift+Space)."
 
 _VK_TO_KEY = {vk: name for name, vk in KEYS.items()}
 
@@ -93,6 +105,10 @@ class SettingsDialog:
         self._pressed: Set[str] = set()
         self._binding = DEFAULTS["hotkey"]
         self._capturing = False
+        self._doc: Optional[SshConfigDocument] = None   # working copy of ~/.ssh/config
+        self._creds_loaded: Tuple[str, str] = ("", "")
+        self._saved = False
+        self._pages: Dict[str, object] = {}
 
     # ------------------------------------------------------------------
     # Public API (any thread)
@@ -100,213 +116,300 @@ class SettingsDialog:
     def prewarm(self) -> None:
         self._ui.run_on_ui(self._build)
 
-    def show(self) -> None:
-        self._ui.run_on_ui(self._do_show)
+    def show(self, page: Optional[str] = None) -> None:
+        self._ui.run_on_ui(lambda: self._do_show(page))
 
     # ------------------------------------------------------------------
-    # Tk thread
+    # Tk thread: build
 
     def _build(self) -> None:
         if self._top is not None:
             return
         import tkinter as tk
-        from tkinter import ttk
+
+        from . import widgets as w
 
         top = tk.Toplevel(self._ui.root)
         self._top = top
         top.title("SSH Connection Manager - Impostazioni")
         theme.toplevel(top)
-        top.resizable(False, False)
+        top.minsize(px(860), px(600))
         top.withdraw()
         top.protocol("WM_DELETE_WINDOW", self._hide)
         top.bind("<Escape>", lambda e: self._hide())
 
-        band = theme.style(tk.Frame(top, height=px(48)), "header")
-        band.pack(fill="x")
-        band.pack_propagate(False)
-        theme.style(tk.Label(band, text="Impostazioni", font=("Segoe UI", 14, "bold")),
-                    "header_title").pack(side="left", padx=20)
+        # --- navigation pane ----------------------------------------------
+        nav = theme.style(tk.Frame(top, width=px(230), pady=px(16)), "window", "nav")
+        nav.pack(side="left", fill="y")
+        nav.pack_propagate(False)
+        w.label(nav, "SSH Connection Manager", "hint", "nav", size=9,
+                anchor="w").pack(fill="x", padx=px(18))
+        w.label(nav, "Impostazioni", "title", "nav", size=16, weight="semibold",
+                anchor="w").pack(fill="x", padx=px(18), pady=(0, px(14)))
+        self._sidebar = w.Sidebar(nav, PAGES, self._show_page, width=230)
+        self._sidebar.pack(fill="both", expand=True)
 
-        nb = ttk.Notebook(top)
-        nb.pack(fill="both", expand=True, padx=16, pady=(12, 0))
+        # --- content + footer ---------------------------------------------
+        right = theme.style(tk.Frame(top), "window")
+        right.pack(side="left", fill="both", expand=True)
+        foot = theme.style(tk.Frame(right, padx=px(24), pady=px(14)), "window")
+        foot.pack(side="bottom", fill="x")
+        w.Divider(right, "bg").pack(side="bottom", fill="x")
+        w.Button(foot, "Salva", self._save, "primary", width=10).pack(side="right")
+        w.Button(foot, "Annulla", self._hide, width=10).pack(side="right", padx=(0, px(8)))
+        self._var_error = tk.StringVar()
+        self._error_label = w.label(foot, "", "error", size=9, anchor="w", justify="left",
+                                    wraplength=px(420), textvariable=self._var_error)
+        self._error_label.pack(side="left", fill="x", expand=True)
+        self._content = theme.style(tk.Frame(right, padx=px(28), pady=px(20)), "window")
+        self._content.pack(fill="both", expand=True)
 
-        def frame(parent, **kw):
-            return theme.style(tk.Frame(parent, **kw), "window")
+        for key, title, _ in PAGES:
+            page = theme.style(tk.Frame(self._content), "window")
+            w.page_title(page, title).pack(fill="x", pady=(0, px(14)))
+            getattr(self, f"_page_{key}")(page, w, tk)
+            self._pages[key] = page
+        self._sidebar.select("general")
+        top.update_idletasks()
 
-        def tab(title):
-            f = frame(nb, padx=14, pady=12)
-            nb.add(f, text=title)
-            return f
+    def _show_page(self, key: str) -> None:
+        for k, page in self._pages.items():
+            if k == key:
+                page.pack(fill="both", expand=True)
+            else:
+                page.pack_forget()
 
-        def label(parent, text="", role="label", size=9, **kw):
-            return theme.style(tk.Label(parent, text=text, font=("Segoe UI", size), **kw), role)
-
-        def hint(parent, text="", **kw):
-            return label(parent, text, "hint", size=8, **kw)
-
-        def check(parent, text, var):
-            return theme.style(tk.Checkbutton(parent, text=text, variable=var, anchor="w",
-                                              font=("Segoe UI", 9)), "check")
-
-        def button(parent, text, command, role="button", bold=False, **kw):
-            font = ("Segoe UI", 9, "bold") if bold else ("Segoe UI", 9)
-            return theme.style(tk.Button(parent, text=text, command=command, relief="flat",
-                                         font=font, cursor="hand2", **kw), role)
-
-        def listbox(parent, height, **kw):
-            f = frame(parent)
-            lb = theme.style(tk.Listbox(f, height=height, activestyle="none",
-                                        exportselection=False, font=("Segoe UI", 9), **kw),
-                             "listbox")
-            lb.pack(side="left", fill="both", expand=True)
-            sb = ttk.Scrollbar(f, orient="vertical", command=lb.yview)
-            sb.pack(side="right", fill="y")
-            lb.config(yscrollcommand=sb.set)
-            return f, lb
-
-        # --- Generale ---------------------------------------------------
-        g = tab("Generale")
-        g.columnconfigure(1, weight=1)
-        label(g, "Scorciatoia ricerca host").grid(row=0, column=0, columnspan=2, sticky="w")
-        hk = frame(g)
-        hk.grid(row=1, column=0, columnspan=2, sticky="we", pady=(2, 0))
+    def _page_general(self, page, w, tk) -> None:
+        card = w.Card(page)
+        card.pack(fill="x")
         self._var_hotkey = tk.StringVar()
-        entry = theme.style(tk.Entry(hk, textvariable=self._var_hotkey, font=("Segoe UI", 11),
-                                     justify="center", cursor="hand2", state="readonly"),
-                            "entry")
-        entry.pack(side="left", fill="x", expand=True, ipady=3)
-        self._hotkey_entry = entry
-        button(hk, "Predefinita", self._reset_hotkey).pack(side="left", padx=(8, 0))
-        self._var_hotkey_hint = tk.StringVar()
-        hint(g, textvariable=self._var_hotkey_hint).grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(2, 12))
+        self._var_hotkey_hint = tk.StringVar(value=_HOTKEY_HINT)
+
+        def hotkey_control(parent):
+            box = theme.style(tk.Frame(parent), "window", "card")
+            entry = theme.style(tk.Entry(box, textvariable=self._var_hotkey, font=theme.font(11),
+                                         justify="center", cursor="hand2", width=18,
+                                         state="readonly"), "entry")
+            entry.pack(side="left", ipady=px(4))
+            w.Button(box, "Predefinita", self._reset_hotkey, surface="card").pack(
+                side="left", padx=(px(8), 0))
+            self._hotkey_entry = entry
+            return box
+        w.setting_row(card, "Scorciatoia ricerca host", control=hotkey_control, first=True,
+                      textvariable=self._var_hotkey_hint)
+        entry = self._hotkey_entry
         entry.bind("<FocusIn>", self._capture_start)
         entry.bind("<FocusOut>", self._capture_end)
         entry.bind("<KeyPress>", self._on_key_press)
         entry.bind("<KeyRelease>", self._on_key_release)
 
-        lo, hi = LIMITS["keepalive_interval"]
-        label(g, "Intervallo keepalive (secondi)").grid(row=3, column=0, sticky="w")
-        self._var_keepalive = tk.StringVar()
-        theme.style(tk.Spinbox(g, from_=lo, to=hi, increment=30, width=7,
-                               textvariable=self._var_keepalive), "spinbox").grid(
-                                   row=3, column=1, sticky="w", padx=8)
-
-        lo, hi = LIMITS["tunnel_timeout"]
-        label(g, "Timeout attesa tunnel (secondi)").grid(row=4, column=0, sticky="w", pady=(6, 0))
-        self._var_tunnel = tk.StringVar()
-        theme.style(tk.Spinbox(g, from_=lo, to=hi, increment=10, width=7,
-                               textvariable=self._var_tunnel), "spinbox").grid(
-                                   row=4, column=1, sticky="w", padx=8, pady=(6, 0))
-        hint(g, "Keepalive e timeout valgono dalla prossima connessione aperta.").grid(
-            row=5, column=0, columnspan=2, sticky="w", pady=(2, 12))
-
         self._var_autostart = tk.BooleanVar()
-        check(g, "Avvia automaticamente con Windows", self._var_autostart).grid(
-            row=6, column=0, columnspan=2, sticky="w")
         self._var_autostart_hint = tk.StringVar()
-        hint(g, textvariable=self._var_autostart_hint, justify="left",
-             wraplength=px(400)).grid(row=7, column=0, columnspan=2, sticky="w")
+        w.setting_row(card, "Avvia automaticamente con Windows",
+                      control=lambda p: w.Toggle(p, self._var_autostart),
+                      textvariable=self._var_autostart_hint)
 
+        w.section_title(page, "Connessioni").pack(fill="x", pady=(px(18), px(6)))
+        card = w.Card(page)
+        card.pack(fill="x")
+        self._var_keepalive = tk.StringVar()
+        self._var_tunnel = tk.StringVar()
+
+        def spin(var, key, step):
+            lo, hi = LIMITS[key]
+            return lambda p: theme.style(tk.Spinbox(p, from_=lo, to=hi, increment=step, width=7,
+                                                    textvariable=var, font=theme.font(10),
+                                                    justify="right"), "spinbox")
+        w.setting_row(card, "Intervallo keepalive (secondi)",
+                      "Ogni quanto i jump host eseguono 'date' per tenere viva la sessione e i "
+                      "tunnel.", control=spin(self._var_keepalive, "keepalive_interval", 30),
+                      first=True)
+        w.setting_row(card, "Timeout attesa tunnel (secondi)",
+                      "Quanto aspettare il tunnel del jump host, compreso il tempo per il token.",
+                      control=spin(self._var_tunnel, "tunnel_timeout", 10))
+        w.label(page, "Keepalive e timeout valgono dalla prossima connessione aperta.", "hint",
+                size=9, anchor="w").pack(fill="x", pady=(px(6), 0))
+
+    def _page_appearance(self, page, w, tk) -> None:
+        card = w.Card(page)
+        card.pack(fill="x")
         self._var_dark = tk.BooleanVar()
-        check(g, "Tema scuro (One Half Dark)", self._var_dark).grid(
-            row=8, column=0, columnspan=2, sticky="w", pady=(12, 0))
-        hint(g, "Per le finestre Cerca host, Cerca file e Impostazioni; si applica al "
-                "salvataggio.", justify="left", wraplength=px(420)).grid(
-                    row=9, column=0, columnspan=2, sticky="w")
-
-        label(g, "Tema delle console PROD").grid(row=10, column=0, sticky="w", pady=(12, 0))
+        w.setting_row(card, "Tema scuro",
+                      "One Half Dark, come Windows Terminal. Vale per Cerca host, Cerca file e "
+                      "Impostazioni; l'anteprima è immediata, Annulla la toglie.",
+                      control=lambda p: w.Toggle(p, self._var_dark,
+                                                 command=lambda: theme.use(self._var_dark.get())),
+                      first=True)
         self._var_prod_theme = tk.StringVar()
-        self._prod_theme_combo = theme.style(
-            ttk.Combobox(g, textvariable=self._var_prod_theme, state="readonly", width=24),
-            "combo")
-        self._prod_theme_combo.grid(row=10, column=1, sticky="w", padx=8, pady=(12, 0))
-        hint(g, "Schema colori applicato ai terminali PROD (anche quelli definiti in "
-                "Windows Terminal). Tutte le console hanno il titolo [TEST]/[PROD] host.",
-             justify="left", wraplength=px(420)).grid(row=11, column=0, columnspan=2, sticky="w")
 
-        # --- Preferiti --------------------------------------------------
-        f = tab("Preferiti")
-        row = frame(f)
-        row.pack(fill="x")
-        label(row, "Filtra host").pack(side="left")
+        def combo(parent):
+            from tkinter import ttk
+            self._prod_theme_combo = theme.style(
+                ttk.Combobox(parent, textvariable=self._var_prod_theme, state="readonly",
+                             width=24, font=theme.font(10)), "combo")
+            return self._prod_theme_combo
+        w.setting_row(card, "Tema delle console PROD",
+                      "Schema colori dei terminali PROD (anche quelli definiti in Windows "
+                      "Terminal). Tutte le console hanno il titolo [TEST]/[PROD] host.",
+                      control=combo)
+
+    def _page_hosts(self, page, w, tk) -> None:
+        from tkinter import ttk
+        w.section_title(page, "Jump host").pack(fill="x", pady=(0, px(6)))
+        card = w.Card(page)
+        card.pack(fill="x")
+        self._var_jump: Dict[str, tk.StringVar] = {}
+        self._jump_rows: Dict[str, tuple] = {}
+        for i, env in enumerate(ENVS):
+            var = tk.StringVar()
+            self._var_jump[env] = var
+            row, entry, desc = w.setting_row(
+                card, env, f"Indirizzo del jump host {env}.", first=(i == 0),
+                control=lambda p, v=var: theme.style(
+                    tk.Entry(p, textvariable=v, font=theme.font(10), width=22), "entry"))
+            entry.grid_configure(ipady=px(4))
+            self._jump_rows[env] = (row.grid_slaves(row=0, column=0)[0], entry, desc)
+
+        head = theme.style(tk.Frame(page), "window")
+        head.pack(fill="x", pady=(px(18), px(6)))
+        w.section_title(head, "Host").pack(side="left")
+        bar = theme.style(tk.Frame(page), "window")
+        bar.pack(fill="x", pady=(0, px(6)))
+        self._var_host_search = tk.StringVar()
+        w.SearchEntry(bar, self._var_host_search, "Cerca host...").pack(
+            side="left", fill="x", expand=True)
+        self._var_host_search.trace_add("write", lambda *_: self._refresh_host_table())
+        w.Button(bar, "Elimina", self._delete_host).pack(side="right")
+        w.Button(bar, "Modifica...", self._edit_host).pack(side="right", padx=(px(8), px(8)))
+        w.Button(bar, "Aggiungi host...", self._add_host, "primary").pack(side="right",
+                                                                          padx=(px(8), 0))
+
+        self._var_hosts_hint = tk.StringVar()
+        w.label(page, "", "hint", size=9, anchor="w", justify="left", wraplength=px(620),
+                textvariable=self._var_hosts_hint).pack(side="bottom", fill="x", pady=(px(6), 0))
+        tframe = theme.style(tk.Frame(page), "field_frame")
+        tframe.pack(fill="both", expand=True)
+        cols = (("env", "Ambiente", 80), ("dest", "Server", 170), ("port", "Porta locale", 90),
+                ("desc", "Descrizione", 220))
+        tree = theme.style(ttk.Treeview(tframe, columns=[c for c, _, _ in cols],
+                                        show="tree headings", selectmode="browse", height=8),
+                           "tree")
+        tree.heading("#0", text="Nome", anchor="w")
+        tree.column("#0", width=px(150), stretch=False)
+        for c, title, width in cols:
+            tree.heading(c, text=title, anchor="w")
+            tree.column(c, width=px(width), anchor="w", stretch=(c == "desc"))
+        tree.pack(side="left", fill="both", expand=True, padx=1, pady=1)
+        sb = ttk.Scrollbar(tframe, orient="vertical", command=tree.yview)
+        sb.pack(side="right", fill="y", pady=1)
+        tree.configure(yscrollcommand=sb.set)
+        tree.bind("<Double-Button-1>", lambda e: self._edit_host())
+        tree.bind("<Return>", lambda e: self._edit_host())
+        tree.bind("<Delete>", lambda e: self._delete_host())
+        self._host_tree = tree
+
+    def _page_account(self, page, w, tk) -> None:
+        card = w.Card(page)
+        card.pack(fill="x")
+        self._var_user = tk.StringVar()
+        self._var_password = tk.StringVar()
+        row, entry, _ = w.setting_row(
+            card, "Nome utente",
+            "Con o senza dominio (es. DOMINIO\\nome.cognome): il dominio viene tolto al login.",
+            control=lambda p: theme.style(tk.Entry(p, textvariable=self._var_user,
+                                                   font=theme.font(10), width=28), "entry"),
+            first=True)
+        entry.grid_configure(ipady=px(4))
+
+        def password_control(parent):
+            box = theme.style(tk.Frame(parent), "window", "card")
+            self._password_entry = theme.style(
+                tk.Entry(box, textvariable=self._var_password, font=theme.font(10), width=24,
+                         show="•"), "entry")
+            self._password_entry.pack(side="left", ipady=px(4))
+            w.IconButton(box, "eye", self._toggle_password, "card",
+                         tooltip="Mostra / nascondi").pack(side="left", padx=(px(4), 0))
+            return box
+        w.setting_row(card, "Password",
+                      "Usata per il login su tutti gli host; viene digitata solo nel terminale "
+                      "della connessione.", control=password_control)
+        self._var_creds_path = tk.StringVar()
+        w.setting_row(card, "File", control=lambda p: w.Button(
+            p, "Apri file", self._open_credentials, surface="card"),
+            textvariable=self._var_creds_path)
+        self._var_info = tk.StringVar()
+        w.label(page, "", "hint", size=9, anchor="w", justify="left", wraplength=px(620),
+                textvariable=self._var_info).pack(fill="x", pady=(px(8), 0))
+
+    def _page_favorites(self, page, w, tk) -> None:
         self._var_fav_filter = tk.StringVar()
-        theme.style(tk.Entry(row, textvariable=self._var_fav_filter, font=("Segoe UI", 9)),
-                    "entry").pack(side="right", fill="x", expand=True, padx=(12, 0))
+        bar = theme.style(tk.Frame(page), "window")
+        bar.pack(fill="x")
+        w.SearchEntry(bar, self._var_fav_filter, "Filtra host...").pack(
+            side="left", fill="x", expand=True)
+        w.Button(bar, "Aggiungi ai preferiti", self._add_favorite, "primary").pack(
+            side="left", padx=(px(8), 0))
         self._var_fav_filter.trace_add("write", lambda *_: self._refresh_hosts())
-        lframe, self._hosts_list = listbox(f, 7)
-        lframe.pack(fill="both", expand=True, pady=(4, 4))
+        self._hosts_list = w.ListView(page, height=6, detail_width=60)
+        self._hosts_list.pack(fill="both", expand=True, pady=(px(6), 0))
         self._hosts_list.bind("<Double-Button-1>", lambda e: self._add_favorite())
 
-        actions = frame(f)
-        actions.pack(fill="x")
-        button(actions, "Aggiungi ai preferiti  ↓", self._add_favorite, "primary",
-               bold=True).pack(side="left")
-
-        label(f, "Preferiti (in cima al menu e alla ricerca, in quest'ordine)").pack(
-            anchor="w", pady=(10, 0))
-        favrow = frame(f)
-        favrow.pack(fill="both", expand=True, pady=(4, 4))
-        lframe, self._fav_list = listbox(favrow, 5)
-        lframe.pack(side="left", fill="both", expand=True)
+        w.section_title(page, "Preferiti — in cima al menu e alla ricerca, in quest'ordine").pack(
+            fill="x", pady=(px(16), px(6)))
+        favrow = theme.style(tk.Frame(page), "window")
+        favrow.pack(fill="both", expand=True)
+        self._fav_list = w.ListView(favrow, height=5, detail_width=150)
+        self._fav_list.pack(side="left", fill="both", expand=True)
         self._fav_list.bind("<Double-Button-1>", lambda e: self._remove_favorite())
-        side = frame(favrow)
-        side.pack(side="left", fill="y", padx=(8, 0))
-        for text, cmd in (("Rimuovi", self._remove_favorite),
-                          ("Su", lambda: self._move_favorite(-1)),
-                          ("Giù", lambda: self._move_favorite(1))):
-            button(side, text, cmd, width=9).pack(pady=(0, 4))
+        side = theme.style(tk.Frame(favrow), "window")
+        side.pack(side="left", fill="y", padx=(px(8), 0))
+        for text, cmd in (("Su", lambda: self._move_favorite(-1)),
+                          ("Giù", lambda: self._move_favorite(1)),
+                          ("Rimuovi", self._remove_favorite)):
+            w.Button(side, text, cmd, width=8).pack(fill="x", pady=(0, px(6)))
 
-        rec = frame(f)
-        rec.pack(fill="x")
+        rec = theme.style(tk.Frame(page), "window")
+        rec.pack(fill="x", pady=(px(10), 0))
         self._var_recents = tk.StringVar()
-        hint(rec, textvariable=self._var_recents).pack(side="left")
-        button(rec, "Svuota recenti", self._clear_recents).pack(side="right")
+        w.label(rec, "", "hint", size=9, textvariable=self._var_recents).pack(side="left")
+        w.Button(rec, "Svuota recenti", self._clear_recents).pack(side="right")
 
-        # --- Notifiche --------------------------------------------------
-        n = tab("Notifiche")
-        label(n, "Mostra una notifica per:").pack(anchor="w", pady=(0, 4))
+    def _page_notifications(self, page, w, tk) -> None:
+        w.label(page, "Notifiche di Windows (balloon della tray) da mostrare:", "hint", size=9,
+                anchor="w").pack(fill="x", pady=(0, px(8)))
+        card = w.Card(page)
+        card.pack(fill="x")
         self._notif_vars = {}
-        for kind, text in NOTIFICATION_KINDS.items():
+        for i, (kind, text) in enumerate(NOTIFICATION_KINDS.items()):
             v = tk.BooleanVar()
             self._notif_vars[kind] = v
-            check(n, text, v).pack(anchor="w", fill="x")
+            w.setting_row(card, text, control=lambda p, v=v: w.Toggle(p, v), first=(i == 0))
 
-        # --- Info -------------------------------------------------------
-        i = tab("Info")
-        theme.style(tk.Label(i, text=f"SSH Connection Manager  v{self._version}",
-                             font=("Segoe UI", 11, "bold")), "label").pack(anchor="w")
+    def _page_info(self, page, w, tk) -> None:
+        card = w.Card(page)
+        card.pack(fill="x")
+        w.setting_row(card, "SSH Connection Manager", f"Versione {self._version}", first=True)
         for title, path in (("Config SSH", self._ssh_config_path),
                             ("Utente e password", ConfigLoader.maven_settings_path()),
                             ("Preferenze", AppSettings.path),
                             ("Log", LOG_FILE)):
-            hint(i, f"{title}:  {path}").pack(anchor="w", pady=(6, 0))
-        links = frame(i)
-        links.pack(anchor="w", pady=(12, 0))
-        button(links, "Apri utente e password", self._open_credentials).pack(side="left")
-        button(links, "Apri config SSH",
-               lambda: self._open(self._ssh_config_path)).pack(side="left", padx=8)
-        button(links, "Apri log", lambda: self._open(LOG_FILE)).pack(side="left")
-        self._var_info = tk.StringVar()
-        hint(i, textvariable=self._var_info, justify="left",
-             wraplength=px(420)).pack(anchor="w", pady=(10, 0))
+            opener = (self._open_credentials if title == "Utente e password"
+                      else lambda p=path: self._open(p))
+            w.setting_row(card, title, str(path),
+                          control=lambda parent, o=opener: w.Button(parent, "Apri", o,
+                                                                    surface="card", width=7))
+        w.label(page, "Modificare i file a mano resta possibile: le pagine Host e Utente e "
+                      "password lo fanno per te senza toccare il resto del file.", "hint", size=9,
+                anchor="w", justify="left", wraplength=px(620)).pack(fill="x", pady=(px(8), 0))
 
-        # --- footer -----------------------------------------------------
-        self._var_error = tk.StringVar()
-        label(top, textvariable=self._var_error, role="error", size=8, anchor="w",
-              wraplength=px(440)).pack(fill="x", padx=18, pady=(6, 0))
-        btns = frame(top)
-        btns.pack(fill="x", padx=16, pady=10)
-        button(btns, "Salva", self._save, "success", bold=True, width=12).pack(side="right")
-        button(btns, "Annulla", self._hide, width=12).pack(side="right", padx=(0, 8))
-        # The favorites placeholder row has its own colours.
-        theme.on_change(lambda: self._refresh_favorites())
-        top.update_idletasks()
+    # ------------------------------------------------------------------
+    # Tk thread: values
 
     def _load_values(self) -> None:
         cfg = AppSettings.all()
+        self._saved = False
         self._set_binding(cfg["hotkey"])
-        self._var_hotkey_hint.set("Clicca il campo e premi la combinazione (es. Ctrl+Shift+Space).")
+        self._var_hotkey_hint.set(_HOTKEY_HINT)
         self._var_keepalive.set(str(cfg["keepalive_interval"]))
         self._var_tunnel.set(str(cfg["tunnel_timeout"]))
         self._var_autostart.set(autostart.is_enabled())
@@ -335,18 +438,47 @@ class SettingsDialog:
         self._refresh_favorites()
         self._var_recents.set(f"Recenti: {len(cfg['recents'])}")
         self._var_error.set("")
-        creds = ConfigLoader.maven_settings_path()
-        self._var_info.set("" if creds.exists() else
-                           f"{creds} non esiste: 'Apri utente e password' lo crea da un modello.")
 
-    def _do_show(self) -> None:
+        self._load_config_doc()
+        creds = ConfigLoader.maven_settings_path()
+        self._creds_loaded = ConfigLoader.read_maven_credentials_raw()
+        self._var_user.set(self._creds_loaded[0])
+        self._var_password.set(self._creds_loaded[1])
+        self._password_entry.configure(show="•")
+        self._var_creds_path.set(str(creds))
+        self._var_info.set("" if creds.exists() else
+                           f"{creds} non esiste ancora: verrà creato al salvataggio.")
+
+    def _load_config_doc(self) -> None:
+        try:
+            self._doc = SshConfigDocument.load(self._ssh_config_path)
+        except ConfigError as e:
+            self._doc = None
+            self._var_hosts_hint.set(str(e))
+        for env in ENVS:
+            title, entry, desc = self._jump_rows[env]
+            jump = self._doc.jump_host(env) if self._doc else None
+            entry_host = self._doc.host(jump) if jump else None
+            title.configure(text=jump or env)
+            self._var_jump[env].set(entry_host.hostname if entry_host else "")
+            entry.configure(state="normal" if entry_host else "disabled")
+            if desc is not None:
+                desc.configure(text=f"Indirizzo del jump host {env}: gli host {env} passano dai "
+                                    f"suoi tunnel." if entry_host else
+                               f"Nessun host login_... nella sezione {env} del config.")
+        self._refresh_host_table()
+
+    def _do_show(self, page: Optional[str] = None) -> None:
         self._build()
         self._load_values()
+        if page in self._pages:
+            self._sidebar.select(page)
         top = self._top
-        w, h = px(500), px(640)
-        x = (top.winfo_screenwidth() - w) // 2
-        y = max(40, (top.winfo_screenheight() - h) // 3)
-        top.geometry(f"{w}x{h}+{x}+{y}")
+        if not top.winfo_viewable():
+            w, h = px(960), px(680)
+            x = (top.winfo_screenwidth() - w) // 2
+            y = max(40, (top.winfo_screenheight() - h) // 3)
+            top.geometry(f"{w}x{h}+{x}+{y}")
         top.deiconify()
         top.lift()
         top.attributes("-topmost", True)
@@ -359,6 +491,8 @@ class SettingsDialog:
 
     def _hide(self) -> str:
         self._capture_end()
+        if not self._saved and theme.is_dark() != AppSettings.get("dark_theme"):
+            theme.use(AppSettings.get("dark_theme"))       # drop the preview
         if self._top is not None:
             self._top.withdraw()
         return "break"
@@ -392,7 +526,7 @@ class SettingsDialog:
         self._var_hotkey.set(self._binding)
         if self._hotkey_suspend:
             self._hotkey_suspend(False)
-        self._var_hotkey_hint.set("Clicca il campo e premi la combinazione (es. Ctrl+Shift+Space).")
+        self._var_hotkey_hint.set(_HOTKEY_HINT)
 
     def _on_key_press(self, event) -> str:
         keysym = event.keysym
@@ -426,6 +560,94 @@ class SettingsDialog:
         return "break"
 
     # ------------------------------------------------------------------
+    # Hosts page
+
+    def _host_entries(self) -> List[HostEntry]:
+        return [h for h in (self._doc.hosts() if self._doc else []) if not h.is_jump]
+
+    def _refresh_host_table(self, select: Optional[str] = None) -> None:
+        tree = self._host_tree
+        tree.delete(*tree.get_children())
+        needle = self._var_host_search.get().strip().lower()
+        seen = set()
+        for h in self._host_entries():
+            if needle and needle not in h.name.lower() and needle not in h.description.lower():
+                continue
+            iid = h.name if h.name not in seen else f"{h.name}#{len(seen)}"
+            seen.add(iid)
+            if h.kind == "tunnel":
+                dest = h.dest if h.dest_port in (None, 22) else f"{h.dest}:{h.dest_port}"
+                port = str(h.port)
+            else:
+                dest = h.hostname + (f":{h.port}" if h.port else "")
+                port = "diretto"
+            desc = h.description + ("  (definito due volte!)" if h.duplicate else "")
+            tree.insert("", "end", iid=iid, text=h.name, values=(h.env, dest, port, desc))
+        n = len(tree.get_children())
+        pending = "  Modifiche non ancora salvate: premi Salva." if (self._doc and
+                                                                   self._doc.dirty) else ""
+        self._var_hosts_hint.set(
+            f"{n} host. Si salva con Salva: prima di scrivere ~/.ssh/config ne viene fatta una "
+            f"copia (config.bak); commenti e altre righe restano come sono.{pending}")
+        if select and tree.exists(select):
+            tree.selection_set(select)
+            tree.focus(select)
+            tree.see(select)
+
+    def _selected_host(self) -> Optional[HostEntry]:
+        sel = self._host_tree.selection()
+        if not sel or self._doc is None:
+            return None
+        name = sel[0].split("#")[0]
+        return next((h for h in self._host_entries() if h.name == name), None)
+
+    def _add_host(self) -> None:
+        if self._doc is None:
+            return
+        HostForm(self, None).open()
+
+    def _edit_host(self) -> None:
+        entry = self._selected_host()
+        if entry is None:
+            self._var_error.set("Seleziona un host da modificare.")
+            return
+        if entry.duplicate or not entry.editable:
+            self._var_error.set(f"{entry.name} è definito più volte o insieme ad altri nomi: "
+                                f"correggilo a mano nel config (Info → Config SSH → Apri).")
+            return
+        HostForm(self, entry).open()
+
+    def _delete_host(self) -> None:
+        from tkinter import messagebox
+        entry = self._selected_host()
+        if entry is None:
+            self._var_error.set("Seleziona un host da eliminare.")
+            return
+        tunnel = " e il tunnel sul jump host" if entry.kind == "tunnel" else ""
+        if not messagebox.askyesno(
+                "Elimina host", f"Eliminare {entry.name}?\n\nVengono tolti il blocco Host, "
+                f"la sua descrizione{tunnel}. Il file si aggiorna quando premi Salva.",
+                parent=self._top):
+            return
+        try:
+            self._doc.delete_host(entry.name)
+        except ConfigError as e:
+            self._var_error.set(str(e))
+            return
+        self._var_error.set("")
+        if entry.name in self._favorites:
+            self._favorites.remove(entry.name)
+            self._refresh_favorites()
+        self._refresh_host_table()
+
+    # ------------------------------------------------------------------
+    # Account page
+
+    def _toggle_password(self) -> None:
+        e = self._password_entry
+        e.configure(show="" if e.cget("show") else "•")
+
+    # ------------------------------------------------------------------
     # Favorites
 
     def _refresh_hosts(self) -> None:
@@ -438,8 +660,8 @@ class SettingsDialog:
                 if needle and needle not in h.lower():
                     continue
                 self._shown_hosts.append(h)
-                mark = "★ " if h in self._favorites else "   "
-                lb.insert("end", f"{mark}{h}   ({env})")
+                mark = "★  " if h in self._favorites else ""
+                lb.insert("end", f"  {mark}{h}", detail=env)
         if self._shown_hosts:
             lb.selection_set(0)
 
@@ -448,11 +670,10 @@ class SettingsDialog:
         lb.delete(0, "end")
         for h in self._favorites:
             env = self._env_of.get(h)
-            lb.insert("end", f"  {h}   ({env})" if env else f"  {h}   (non più nel config)")
+            lb.insert("end", f"  {h}", detail=env or "non più nel config")
         if not self._favorites:
-            lb.insert("end", "  Nessun preferito: seleziona un host sopra e premi Aggiungi")
-            muted, field = theme.color("muted"), theme.color("field")
-            lb.itemconfig(0, fg=muted, selectforeground=muted, selectbackground=field)
+            lb.insert("end", "  Nessun preferito: scegli un host sopra e premi Aggiungi",
+                      tags=("muted",))
         elif select is not None:
             select = max(0, min(select, len(self._favorites) - 1))
             lb.selection_set(select)
@@ -517,8 +738,8 @@ class SettingsDialog:
             return
         if created:
             self._var_info.set(
-                f"Creato {path}: sostituisci INSERISCI_UTENTE e INSERISCI_PASSWORD e salva. "
-                f"Vale dalla prossima connessione, senza riavviare.")
+                f"Creato {path}: sostituisci INSERISCI_UTENTE e INSERISCI_PASSWORD e salva "
+                f"(oppure compila i campi qui sopra). Vale dalla prossima connessione.")
         else:
             self._var_info.set("Le credenziali sono lette dal primo <server> del file. "
                                "Le modifiche valgono dalla prossima connessione.")
@@ -537,9 +758,10 @@ class SettingsDialog:
             logging.error(f"Cannot open {path}: {e}")
 
     # ------------------------------------------------------------------
+    # Save
 
     def collect(self) -> Tuple[Optional[Dict], Optional[str]]:
-        """Validated values from the widgets, or (None, error message)."""
+        """Validated preference values from the widgets, or (None, error message)."""
         if parse_binding(self._binding) is None:
             return None, "Scorciatoia non valida: serve almeno un modificatore (Ctrl, Shift, Alt, Win)."
         values = {"hotkey": self._binding}
@@ -560,15 +782,189 @@ class SettingsDialog:
         values["dark_theme"] = self._var_dark.get()
         return values, None
 
+    def _apply_jump_hosts(self) -> Optional[str]:
+        """Jump host addresses typed in the Host page -> working copy."""
+        if self._doc is None:
+            return None
+        for env in ENVS:
+            jump = self._doc.jump_host(env)
+            entry = self._doc.host(jump) if jump else None
+            new = self._var_jump[env].get().strip()
+            if entry is None or new == entry.hostname:
+                continue
+            try:
+                self._doc.set_jump_hostname(env, new)
+            except ConfigError as e:
+                return f"Jump host {jump}: {e}"
+        return None
+
+    def _write_files(self) -> Optional[str]:
+        """~/.ssh/config (if hosts changed) and settings.xml (if the
+        credentials changed). Returns an error message or None."""
+        if self._doc is not None and self._doc.dirty:
+            try:
+                backup = self._doc.save()
+                logging.info(f"SSH config saved from the settings (backup: {backup})")
+            except ConfigError as e:
+                return str(e)
+        creds = (self._var_user.get().strip(), self._var_password.get())
+        if creds != self._creds_loaded:
+            if not creds[0] or not creds[1]:
+                return "Utente e password: compila entrambi i campi (o lasciali com'erano)."
+            try:
+                ConfigLoader.save_maven_credentials(*creds)
+                logging.info("Credentials saved in settings.xml from the settings dialog")
+            except ValueError as e:
+                return f"Utente e password non salvati: {e}"
+            self._creds_loaded = creds
+        return None
+
     def _save(self) -> None:
         values, error = self.collect()
+        if error is None:
+            error = self._apply_jump_hosts()
         if error is None:
             try:
                 error = self._on_save(values)
             except Exception as e:
                 logging.error(f"Saving settings failed: {e}", exc_info=True)
                 error = f"Errore nel salvataggio: {e}"
+        if error is None:
+            error = self._write_files()
         if error:
             self._var_error.set(error)
             return
+        self._saved = True
         self._hide()
+
+
+class HostForm:
+    """Modal form to add or edit a host (working copy of the config)."""
+
+    def __init__(self, dialog: SettingsDialog, entry: Optional[HostEntry]):
+        self._dlg = dialog
+        self._entry = entry
+        self._doc = dialog._doc
+
+    def open(self) -> None:
+        import tkinter as tk
+
+        from . import widgets as w
+        dlg, entry = self._dlg, self._entry
+        new = entry is None
+        kind = "tunnel" if new else entry.kind
+        top = tk.Toplevel(dlg._top)
+        self._top = top
+        top.title("Nuovo host" if new else f"Modifica {entry.name}")
+        theme.toplevel(top)
+        top.transient(dlg._top)
+        top.resizable(False, False)
+        body = theme.style(tk.Frame(top, padx=px(24), pady=px(20)), "window")
+        body.pack(fill="both", expand=True)
+        w.page_title(body, "Nuovo host" if new else entry.name).pack(fill="x")
+        subtitle = ("Raggiunto tramite un tunnel del jump host: l'app aggiunge da sola il "
+                    "LocalForward e la voce Host." if kind == "tunnel" else
+                    "Host raggiunto direttamente (HostName e porta propri).")
+        w.label(body, subtitle, "hint", size=9, anchor="w", justify="left",
+                wraplength=px(440)).pack(fill="x", pady=(px(2), px(14)))
+
+        card = w.Card(body)
+        card.pack(fill="x")
+        self._vars: Dict[str, tk.StringVar] = {}
+
+        def field(key, title, desc, value="", width=26, first=False):
+            var = tk.StringVar(value=value)
+            self._vars[key] = var
+            _, e, _ = w.setting_row(card, title, desc, first=first, control=lambda p: theme.style(
+                tk.Entry(p, textvariable=var, font=theme.font(10), width=width), "entry"))
+            e.grid_configure(ipady=px(4))
+            return e
+
+        self._var_env = tk.StringVar(value=entry.env if entry else
+                                     (AppSettings.get("search_env")
+                                      if AppSettings.get("search_env") in ENVS else "TEST"))
+        if new:
+            w.setting_row(card, "Ambiente", "Sezione del config e jump host da usare.",
+                          first=True, control=lambda p: w.Segmented(
+                              p, ENVS, self._var_env, command=self._update_port_hint,
+                              surface="card"))
+        name_entry = field("name", "Nome", "Il nome usato nel menu e con ssh (es. gwit1te05).",
+                           "" if new else entry.name, first=not new)
+        field("description", "Descrizione", "Facoltativa, scritta come commento sopra l'host.",
+              "" if new else entry.description)
+        if kind == "tunnel":
+            dest = "" if new or entry.dest == entry.name else entry.dest
+            field("dest", "Server di destinazione",
+                  "Nome o IP visto dal jump host. Vuoto = uguale al nome.", dest)
+            field("dest_port", "Porta SSH del server", "", "22" if new else str(entry.dest_port),
+                  width=8)
+            self._port_row_desc = tk.StringVar()
+            var = tk.StringVar(value="" if new else str(entry.port))
+            self._vars["local_port"] = var
+            _, e, _ = w.setting_row(card, "Porta locale del tunnel", control=lambda p: theme.style(
+                tk.Entry(p, textvariable=var, font=theme.font(10), width=8), "entry"),
+                textvariable=self._port_row_desc)
+            e.grid_configure(ipady=px(4))
+            self._update_port_hint()
+        else:
+            field("hostname", "HostName", "Nome o indirizzo IP del server.", entry.hostname)
+            field("port", "Porta", "Vuoto = 22.", str(entry.port or ""), width=8)
+
+        self._var_error = tk.StringVar()
+        w.label(body, "", "error", size=9, anchor="w", justify="left", wraplength=px(440),
+                textvariable=self._var_error).pack(fill="x", pady=(px(10), 0))
+        btns = theme.style(tk.Frame(body), "window")
+        btns.pack(fill="x", pady=(px(10), 0))
+        w.Button(btns, "Aggiungi" if new else "Applica", self._ok, "primary", width=10).pack(
+            side="right")
+        w.Button(btns, "Annulla", top.destroy, width=10).pack(side="right", padx=(0, px(8)))
+        top.bind("<Escape>", lambda e: top.destroy())
+        top.bind("<Return>", lambda e: self._ok())
+
+        top.update_idletasks()
+        x = dlg._top.winfo_rootx() + (dlg._top.winfo_width() - top.winfo_reqwidth()) // 2
+        y = dlg._top.winfo_rooty() + max(0, (dlg._top.winfo_height() - top.winfo_reqheight()) // 3)
+        top.geometry(f"+{max(0, x)}+{max(0, y)}")
+        top.attributes("-topmost", True)
+        top.grab_set()
+        name_entry.focus_set()
+
+    def _update_port_hint(self) -> None:
+        if not hasattr(self, "_port_row_desc"):
+            return
+        try:
+            free = self._doc.next_free_port(self._var_env.get())
+        except Exception:
+            free = None
+        own = "" if self._entry is None else "Cambiala solo se serve. "
+        self._port_row_desc.set(f"{own}Vuoto = prima libera ({free})." if free else own)
+
+    def _ok(self) -> None:
+        v = {k: var.get().strip() for k, var in self._vars.items()}
+        doc, entry = self._doc, self._entry
+        try:
+            if entry is None:
+                result = doc.add_host(self._var_env.get(), v["name"], dest=v["dest"],
+                                      dest_port=v["dest_port"] or 22,
+                                      local_port=v["local_port"] or None,
+                                      description=v["description"])
+            elif entry.kind == "tunnel":
+                result = doc.update_host(entry.name, new_name=v["name"],
+                                         dest=v["dest"] or v["name"],
+                                         dest_port=v["dest_port"] or 22,
+                                         local_port=v["local_port"] or None,
+                                         description=v["description"])
+            else:
+                result = doc.update_host(entry.name, new_name=v["name"], hostname=v["hostname"],
+                                         port=v["port"] or None, description=v["description"])
+        except ConfigError as e:
+            self._var_error.set(str(e))
+            return
+        dlg = self._dlg
+        if entry is not None and result is not None and result.name != entry.name \
+                and entry.name in dlg._favorites:
+            dlg._favorites[dlg._favorites.index(entry.name)] = result.name
+            dlg._refresh_favorites()
+        dlg._var_error.set("")
+        dlg._refresh_host_table(select=result.name if result else None)
+        self._top.destroy()

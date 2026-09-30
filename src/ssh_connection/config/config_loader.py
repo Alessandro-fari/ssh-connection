@@ -1,8 +1,10 @@
 import yaml
+import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from dataclasses import dataclass
+from xml.sax.saxutils import escape as xml_escape
 import os
 
 from ..security.crypto_util import CryptoUtil
@@ -48,6 +50,49 @@ _MAVEN_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
+def _mask_comments(text: str) -> str:
+    """`text` with the inside of <!-- --> replaced by spaces (same length),
+    so a search never matches the '<server>' mentioned in a comment."""
+    return re.sub(r"<!--.*?-->", lambda m: " " * len(m.group(0)), text, flags=re.S)
+
+
+def _set_server_credentials(text: str, username: str, password: str) -> str:
+    masked = _mask_comments(text)
+    servers = re.search(r"<servers\b[^>]*>(.*?)</servers>", masked, re.S)
+    if servers is None:
+        closing = masked.rfind("</settings>")
+        if closing < 0:
+            raise ValueError("settings.xml senza <settings>: correggilo a mano.")
+        block = (f"  <servers>\n    <server>\n      <id>ssh-connection</id>\n"
+                 f"      <username>{xml_escape(username)}</username>\n"
+                 f"      <password>{xml_escape(password)}</password>\n    </server>\n"
+                 f"  </servers>\n")
+        return text[:closing] + block + text[closing:]
+    server = re.search(r"<server\b[^>]*>(.*?)</server>", masked[servers.start(1):servers.end(1)],
+                       re.S)
+    if server is None:
+        at = servers.end(1)
+        block = (f"  <server>\n      <id>ssh-connection</id>\n"
+                 f"      <username>{xml_escape(username)}</username>\n"
+                 f"      <password>{xml_escape(password)}</password>\n    </server>\n  ")
+        return text[:at] + block + text[at:]
+    start, end = servers.start(1) + server.start(1), servers.start(1) + server.end(1)
+    inner, inner_masked = text[start:end], masked[start:end]
+    for tag, value in (("username", username), ("password", password)):
+        m = re.search(rf"<{tag}\s*>(.*?)</{tag}\s*>|<{tag}\s*/>", inner_masked, re.S)
+        element = f"<{tag}>{xml_escape(value)}</{tag}>"
+        if m:
+            inner = inner[:m.start()] + element + inner[m.end():]
+        else:                               # missing: after <id>, same indentation
+            indent = re.search(r"\n([ \t]*)<", inner)
+            ind = indent.group(1) if indent else "      "
+            after_id = re.search(r"</id\s*>", inner_masked)
+            at = after_id.end() if after_id else 0
+            inner = inner[:at] + f"\n{ind}{element}" + inner[at:]
+        inner_masked = _mask_comments(inner)
+    return text[:start] + inner + text[end:]
+
+
 class ConfigLoader:
     """Loader for application configuration from YAML files and Maven settings"""
 
@@ -67,6 +112,58 @@ class ConfigLoader:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(_MAVEN_TEMPLATE, encoding="utf-8")
         return True
+
+    @staticmethod
+    def read_maven_credentials_raw(path: Optional[Path] = None) -> Tuple[str, str]:
+        """Username and password as written in the first <server> (domain
+        prefix kept, template placeholders shown as empty), for the settings
+        dialog. ('', '') when the file is missing or unreadable."""
+        path = path or ConfigLoader.maven_settings_path()
+        try:
+            server = ConfigLoader._find(ConfigLoader._find(ET.parse(path).getroot(),
+                                                           './/servers'), './/server')
+        except Exception:
+            return "", ""
+        values = []
+        for tag in ("username", "password"):
+            elem = ConfigLoader._find(server, tag) if server is not None else None
+            text = (elem.text or "").strip() if elem is not None else ""
+            values.append("" if text.startswith("INSERISCI_") else text)
+        return values[0], values[1]
+
+    @staticmethod
+    def save_maven_credentials(username: str, password: str,
+                               path: Optional[Path] = None) -> bool:
+        """Write username/password into the first <server> of settings.xml,
+        creating the file from the template if missing. Only the text of the
+        two elements changes: comments, other servers and the rest of a real
+        Maven configuration stay as they are. Returns True if the file was
+        created. Raises ValueError with a message for the user."""
+        path = path or ConfigLoader.maven_settings_path()
+        created = False
+        if not path.exists():
+            if path == ConfigLoader.maven_settings_path():
+                created = ConfigLoader.ensure_maven_settings()
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(_MAVEN_TEMPLATE, encoding="utf-8")
+                created = True
+        try:
+            text = path.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            raise ValueError(f"Impossibile leggere {path}: {e}")
+        new_text = _set_server_credentials(text, username.strip(), password)
+        try:
+            ET.fromstring(new_text.lstrip("﻿").encode("utf-8"))
+        except ET.ParseError as e:
+            raise ValueError(f"{path.name} non è un XML valido ({e}): correggilo a mano.")
+        tmp = path.with_name(path.name + ".tmp")
+        try:
+            tmp.write_bytes(new_text.encode("utf-8"))
+            os.replace(tmp, path)
+        except OSError as e:
+            raise ValueError(f"Impossibile scrivere {path}: {e}")
+        return created
 
     @staticmethod
     def _find(elem, path: str):

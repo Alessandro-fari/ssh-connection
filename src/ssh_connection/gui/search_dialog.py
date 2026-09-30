@@ -144,22 +144,22 @@ def build_host_rows(envs: Sequence[Tuple[str, List[str]]], favorites: Sequence[s
     return rows
 
 
-def fill_host_listbox(listbox, rows: List[dict], favorites: Sequence[str]) -> None:
-    """Show `rows` in a tk.Listbox: separators greyed and visually
-    unselectable, favorites starred, quick-access rows tagged with the env.
-    Separator colours come from the current theme: refill after a switch."""
-    favs = set(favorites)
-    sep_bg, muted = theme.color("sep_bg"), theme.color("muted")
+def fill_host_listbox(listbox, rows: List[dict], favorites: Sequence[str],
+                      active: Sequence[str] = ()) -> None:
+    """Show `rows` in a widgets.ListView: separators as small section
+    titles, each host with its status icon (TEST circle / PROD square, green
+    when connected), favorites starred, quick-access rows with the env."""
+    from .widgets import status_image
+    favs, active = set(favorites), set(active)
     listbox.delete(0, "end")
-    for i, r in enumerate(rows):
+    for r in rows:
         if r["type"] == "sep":
-            listbox.insert("end", "  " + r["label"])
-            listbox.itemconfig(i, bg=sep_bg, fg=muted,
-                               selectbackground=sep_bg, selectforeground=muted)
+            listbox.insert("end", "  " + r["label"].upper(), tags=("sep",))
         else:
-            mark = _STAR + " " if r["host"] in favs else "   "
-            tag = f"   ({r['env']})" if r["tagged"] else ""
-            listbox.insert("end", "  " + mark + r["host"] + tag)
+            mark = _STAR + "  " if r["host"] in favs else ""
+            listbox.insert("end", "  " + mark + r["host"],
+                           image=status_image(r["env"], r["host"] in active),
+                           detail=r["env"] if r["tagged"] else "")
 
 
 def next_host_row(rows: List[dict], start: int, step: int) -> int:
@@ -189,8 +189,10 @@ class SearchPopup:
     def __init__(self,
                  host_provider: Callable[[], Sequence[Tuple[str, List[str]]]],
                  on_select: Callable[[str], None],
-                 on_file_search: Optional[Callable[[str], None]] = None):
+                 on_file_search: Optional[Callable[[str], None]] = None,
+                 status_provider: Optional[Callable[[], Sequence[str]]] = None):
         self._host_provider = host_provider
+        self._status_provider = status_provider
         self._on_select = on_select
         self._on_file_search = on_file_search
         self._requests: "queue.Queue[tuple]" = queue.Queue()
@@ -203,6 +205,7 @@ class SearchPopup:
         self._env_touched = False
         self._favs: List[str] = []
         self._recents: List[str] = []
+        self._active: set = set()
 
     # ------------------------------------------------------------------
     # Public API (callable from any thread)
@@ -231,6 +234,14 @@ class SearchPopup:
             self.start()
         self._requests.put(("call", fn))
 
+    def active_hosts(self) -> set:
+        """Hosts connected right now (status icons of the host lists)."""
+        try:
+            return set(self._status_provider()) if self._status_provider else set()
+        except Exception as e:
+            logging.debug(f"Status provider failed: {e}")
+            return set()
+
     @property
     def root(self):
         """The Tk root — only to be used from inside run_on_ui callbacks."""
@@ -248,7 +259,8 @@ class SearchPopup:
     def _run(self) -> None:
         try:
             import tkinter as tk
-            from tkinter import ttk
+
+            from . import widgets as w
 
             root = tk.Tk()
             self._root = root
@@ -261,76 +273,60 @@ class SearchPopup:
             # so the next open stays instantaneous.
             root.protocol("WM_DELETE_WINDOW", self._hide)
 
-            # --- header band -------------------------------------------
-            band = theme.style(tk.Frame(root, height=px(48)), "header")
-            band.pack(fill="x")
-            band.pack_propagate(False)
-            theme.style(tk.Label(band, text="Cerca host", font=("Segoe UI", 14, "bold")),
-                        "header_title").pack(side="left", padx=20)
+            body = theme.style(tk.Frame(root, padx=px(18), pady=px(16)), "window")
+            body.pack(fill="both", expand=True)
 
-            # --- filter row --------------------------------------------
-            row = theme.style(tk.Frame(root), "window")
-            row.pack(fill="x", padx=20, pady=(12, 8))
-
+            # --- search field + environment ------------------------------
+            row = theme.style(tk.Frame(body), "window")
+            row.pack(fill="x")
             self._var_filter = tk.StringVar()
-            entry = theme.style(tk.Entry(row, textvariable=self._var_filter,
-                                         font=("Segoe UI", 12)), "entry")
-            entry.pack(side="left", fill="x", expand=True, ipady=4)
+            search = w.SearchEntry(row, self._var_filter, "Cerca un host...", size=12)
+            search.pack(side="left", fill="x", expand=True)
+            entry = search.entry
             self._entry = entry
-
             self._var_env = tk.StringVar(value="Tutti")
-            combo = ttk.Combobox(row, textvariable=self._var_env,
-                                 values=list(_ENVS), state="readonly",
-                                 width=7, font=("Segoe UI", 10))
-            theme.style(combo, "combo")
-            combo.pack(side="left", padx=(8, 0))
-            self._combo = combo
+            self._segmented = w.Segmented(row, _ENVS, self._var_env,
+                                          command=self._on_env_changed)
+            self._segmented.pack(side="left", padx=(px(10), 0), fill="y")
 
-            # --- results listbox ---------------------------------------
-            body = theme.style(tk.Frame(root), "window")
-            body.pack(fill="both", expand=True, padx=20)
-            listbox = theme.style(tk.Listbox(body, font=("Segoe UI", 10), activestyle="none",
-                                             height=12, exportselection=False), "listbox")
-            listbox.pack(side="left", fill="both", expand=True)
-            sb = ttk.Scrollbar(body, orient="vertical", command=listbox.yview)
-            sb.pack(side="right", fill="y")
-            listbox.config(yscrollcommand=sb.set)
+            # --- results -------------------------------------------------
+            listbox = w.ListView(body, height=12, detail_width=70)
+            listbox.pack(fill="both", expand=True, pady=(px(12), 0))
             self._list = listbox
 
+            # --- footer: count + keys, buttons ------------------------------
+            foot = theme.style(tk.Frame(body), "window")
+            foot.pack(fill="x", pady=(px(12), 0))
             self._var_status = tk.StringVar(value="")
-            theme.style(tk.Label(root, textvariable=self._var_status,
-                                 font=("Segoe UI", 8), anchor="w"), "hint").pack(
-                         fill="x", padx=22, pady=(4, 0))
-
-            # --- buttons -----------------------------------------------
-            btns = theme.style(tk.Frame(root), "window")
-            btns.pack(fill="x", padx=20, pady=10)
-            theme.style(tk.Button(btns, text="Connetti", command=self._confirm, relief="flat",
-                                  font=("Segoe UI", 9, "bold"), width=12, cursor="hand2"),
-                        "success").pack(side="right")
-            theme.style(tk.Button(btns, text="Annulla", command=self._hide, relief="flat",
-                                  font=("Segoe UI", 9), width=12, cursor="hand2"),
-                        "button").pack(side="right", padx=(0, 8))
+            info = theme.style(tk.Frame(foot), "window")
+            info.pack(side="left", fill="x", expand=True)
+            w.label(info, role="label", size=9, weight="semibold", anchor="w",
+                    textvariable=self._var_status).pack(anchor="w")
+            self._hints = w.label(info, "Invio connette  ·  Ctrl+D preferito  ·  "
+                                        "Ctrl+F cerca file  ·  Esc chiude", "hint", size=8,
+                                  anchor="w")
+            self._hints.pack(anchor="w")
+            w.Button(foot, "Connetti", self._confirm, "primary").pack(side="right")
+            w.Button(foot, "Annulla", self._hide).pack(side="right", padx=(0, px(8)))
 
             # --- bindings ----------------------------------------------
             # Typing filters live; arrows/Enter/Esc work from the entry so the
             # user never has to leave the keyboard or click the list.
             self._var_filter.trace_add("write", lambda *_: self._refresh())
-            combo.bind("<<ComboboxSelected>>", self._on_env_changed)
-            for w in (root, entry, listbox, combo):
-                w.bind("<Escape>", lambda e: self._hide())
-                w.bind("<Return>", lambda e: self._confirm())
-                w.bind("<Down>", lambda e: self._move(1))
-                w.bind("<Up>", lambda e: self._move(-1))
-                w.bind("<Next>", lambda e: self._move(10))
-                w.bind("<Prior>", lambda e: self._move(-10))
-                w.bind("<Control-d>", lambda e: self._toggle_favorite())
-                w.bind("<Control-D>", lambda e: self._toggle_favorite())
-                w.bind("<Control-f>", lambda e: self._file_search())
-                w.bind("<Control-F>", lambda e: self._file_search())
+            for wd in (root, entry, listbox):
+                wd.bind("<Escape>", lambda e: self._hide())
+                wd.bind("<Return>", lambda e: self._confirm())
+                wd.bind("<Down>", lambda e: self._move(1))
+                wd.bind("<Up>", lambda e: self._move(-1))
+                wd.bind("<Next>", lambda e: self._move(10))
+                wd.bind("<Prior>", lambda e: self._move(-10))
+                wd.bind("<Control-d>", lambda e: self._toggle_favorite())
+                wd.bind("<Control-D>", lambda e: self._toggle_favorite())
+                wd.bind("<Control-f>", lambda e: self._file_search())
+                wd.bind("<Control-F>", lambda e: self._file_search())
             listbox.bind("<Double-Button-1>", lambda e: self._confirm())
             listbox.bind("<<ListboxSelect>>", self._on_click_select)
-            # Separator rows carry their own colours: refill on a theme switch.
+            # Row images (status, file icons) depend on the theme.
             theme.on_change(lambda: self._refresh(keep_host=self._current_host()))
 
             root.update_idletasks()
@@ -382,6 +378,7 @@ class SearchPopup:
         self._env_touched = False
         self._favs = AppSettings.favorites()
         self._recents = AppSettings.recents()
+        self._active = self.active_hosts()
         self._var_env.set(env)
         self._var_filter.set("")     # also triggers _refresh() via the trace
         self._refresh()
@@ -412,7 +409,7 @@ class SearchPopup:
 
     def _center(self) -> None:
         root = self._root
-        w, h = px(480), px(430)
+        w, h = px(540), px(560)
         sw = root.winfo_screenwidth()
         sh = root.winfo_screenheight()
         x = (sw - w) // 2
@@ -426,12 +423,11 @@ class SearchPopup:
         rows = build_host_rows(self._envs, self._favs, self._recents,
                                self._var_filter.get(), self._var_env.get())
         self._rows = rows
-        fill_host_listbox(self._list, rows, self._favs)
+        fill_host_listbox(self._list, rows, self._favs, self._active)
 
         n_hosts = len({r["host"] for r in rows if r["type"] == "host"})
-        self._var_status.set(
-            "{} host  -  Invio connette  -  Ctrl+D preferito  -  Ctrl+F cerca file  -  "
-            "Esc chiude".format(n_hosts))
+        self._var_status.set("1 host" if n_hosts == 1 else f"{n_hosts} host"
+                             if n_hosts else "Nessun host trovato")
         target = -1
         if keep_host:
             target = next((i for i, r in enumerate(rows)

@@ -45,6 +45,7 @@ INIT_ENVS = {
 }
 
 NotifyFn = Callable[[str, str], None]
+TokenPrompt = Callable[[str], Optional[str]]
 
 
 class InitOrchestrator:
@@ -56,6 +57,9 @@ class InitOrchestrator:
     _running = set()  # environments currently being opened
     # (host, pid, create_time) for every console we spawned during Init.
     _procs: List[Tuple[str, int, float]] = []
+    # Token prompt installed by the tray (gui.token_dialog.TokenDialog.ask,
+    # instant and themed). None -> the PowerShell dialog below (CLI use).
+    token_prompt: Optional[TokenPrompt] = None
 
     @classmethod
     def start(cls, env: str, notify: NotifyFn) -> None:
@@ -218,8 +222,10 @@ class InitOrchestrator:
                 kill_console(pid)
         return alive
 
-    # Windows Forms token dialog, run as a SEPARATE PowerShell process.
-    # Rationale: the tray runs a Win32 message loop on the main thread, and
+    # Fallback token dialog (no tray UI, e.g. from the command line): Windows
+    # Forms run as a SEPARATE PowerShell process. It takes seconds to start and
+    # ignores theme and DPI, which is why the tray installs `token_prompt`.
+    # Original rationale: the tray runs a Win32 message loop on the main thread, and
     # creating a tkinter root + mainloop in a worker thread of the same
     # process destabilises that loop (the tray menu stops responding). A
     # separate STA process has its own message loop, always shows in the
@@ -336,10 +342,20 @@ if ($res -eq [System.Windows.Forms.DialogResult]::OK) {
     @staticmethod
     def _ask_token(env: str) -> Optional[str]:
         """
-        Prompt for the 2FA token via a Windows Forms dialog running in a
-        separate STA PowerShell process. Returns the token, or None if
-        cancelled/closed/empty.
+        Prompt for the 2FA token: the tray's `token_prompt` when installed,
+        otherwise a Windows Forms dialog in a separate STA PowerShell
+        process. Returns the token, or None if cancelled/closed/empty.
         """
+        prompt = InitOrchestrator.token_prompt
+        if prompt is not None:
+            try:
+                logging.info(f"Opening token prompt for {env}")
+                token = prompt(env)
+                logging.info(f"Token prompt closed (got token: {bool(token)})")
+                return token or None
+            except Exception as e:
+                logging.error(f"Token prompt failed, falling back to PowerShell: {e}",
+                              exc_info=True)
         try:
             logging.info(f"Opening token dialog for {env} (powershell subprocess)")
             cfg = INIT_ENVS[env]

@@ -66,6 +66,30 @@ mirato della password nel terminale e stato live delle connessioni.
 - Ignora gli host wildcard (`*`). Nessuna cache: viene ri-parsato a ogni richiesta,
   ed è questo che rende possibile l'hot-reload della configurazione.
 
+### `ssh/ssh_config_editor.py` — modifica di `~/.ssh/config` dalle Impostazioni
+`SshConfigDocument` tiene le **righe del file così come sono** e ogni operazione tocca solo
+le righe necessarie (riga `Host`, direttive `HostName`/`Port`, un `LocalForward` del jump
+host), copiando l'indentazione delle righe vicine: commenti, tab, CRLF, BOM, blocchi
+wildcard e direttive commentate restano intatti. Il file non viene mai rigenerato.
+- **Modello** (lo stesso che usa il launcher): sezioni TEST/PROD dai commenti, con la
+  stessa regola di `SshConfigParser`; jump host = primo `login*` della sezione. Un host
+  *tunnel* ha `HostName localhost` + `Port P`, e sul jump host c'è
+  `LocalForward P destinazione:porta`. Gli host *diretti* hanno un HostName proprio. La
+  descrizione è il blocco di commenti subito sopra `Host`.
+- **Blocchi**: da `Host`/`Match` al successivo, escluse righe vuote finali e commenti non
+  indentati (intestazioni di sezione, note tra blocchi).
+- `hosts()` → `HostEntry` (kind `jump`/`tunnel`/`direct`, `duplicate` se il nome ha più
+  blocchi: ssh usa il primo, quindi non è modificabile da qui).
+- `add_host(env, …)`: prima porta libera dopo i tunnel del jump host
+  (`next_free_port`, salta le porte locali usate ovunque nel file), blocco Host in fondo
+  alla sezione, tunnel dopo l'ultimo `LocalForward` del jump host.
+- `update_host` / `delete_host` / `set_jump_hostname`. Validazioni con `ConfigError`
+  (messaggio in italiano): nome unico e senza spazi o jolly, porte 1-65535 e libere, una
+  descrizione non può nominare l'altro ambiente (il parser la leggerebbe come intestazione
+  di sezione), il jump host non si rinomina né si elimina.
+- `save()`: rifiuta se il file è cambiato su disco dopo `load()`, scrive `config.bak`
+  e poi sostituisce il file in modo atomico (`.tmp` + `os.replace`).
+
 ### `ssh/ssh_launcher.py` — apertura delle connessioni
 Flusso di `connect(name)` (eseguito in un thread in background per non bloccare il menu):
 1. **Jump host automatico**: determina il jump host (`login_*`) della sezione a cui
@@ -100,10 +124,11 @@ token 2FA, apre un ambiente. Config in costante `INIT_ENVS = {TEST: {login, targ
 (login = jump host; targets = i due `stli*` settlement/DB dell'ambiente).
 1. `start(env, notify)` avvia un thread worker con single-flight **per ambiente**
    (`_running` è un set di ambienti in corso).
-2. Chiede il token in una dialog **Windows Forms eseguita come processo PowerShell
-   separato** (STA): ha un proprio message loop (non interferisce con la tray), si forza
-   in primo piano (`SetForegroundWindow`/`BringWindowToTop`) e mostra titolo/host
-   dell'ambiente. Stampa il token su stdout su OK, niente su Annulla.
+2. Chiede il token con `InitOrchestrator.token_prompt`, installato dalla tray: è
+   `TokenDialog.ask` (`gui/token_dialog.py`), una finestra Tk pre-caricata sul thread del
+   popup, quindi istantanea e a tema. Senza tray (uso da riga di comando) resta il vecchio
+   dialog **Windows Forms in un processo PowerShell separato**, che però impiega circa 3 s
+   ad apparire.
 3. Apre il jump host `login_*` iniettando `[password, token]` (`inject_secrets` con gating
    posizionale del cursore per distinguere prompt password → prompt token). Registrato nel
    tracker (menu lo mostra attivo, i click normali riusano i suoi tunnel).
@@ -176,8 +201,10 @@ risultati tardivi della vecchia vengono scartati.
 
 `Toplevel` dello stesso root Tk di `SearchPopup`, costruita e pilotata tramite
 `run_on_ui`. Aperta dalla voce tray "Cerca file..." o da **Ctrl+F** nel popup host
-(`on_file_search`). A sinistra il pannello host: campo filtro, combo Tutti/TEST/PROD e
-lista con Preferiti, Recenti e ambienti. Le righe vengono dalle stesse funzioni del popup
+(`on_file_search`). A sinistra il pannello host (superficie `nav`): campo filtro,
+selettore segmentato Tutti/TEST/PROD e `ListView` con Preferiti, Recenti e ambienti e le
+icone di stato (`SearchPopup.active_hosts()`). A destra: titolo con chip TEST/PROD, barra
+percorso con pulsanti icona (con tooltip), filtri con placeholder, tabella, stato e azioni. Le righe vengono dalle stesse funzioni del popup
 (`build_host_rows` / `fill_host_listbox` / `next_host_row` in `search_dialog.py`),
 quindi i due elenchi si comportano allo stesso modo. La riga selezionata è l'host
 attivo: filtrare sceglie la corrispondenza migliore; frecce e clic cambiano host; Ctrl+D
@@ -314,13 +341,14 @@ delle righe diversamente dal previsto (il dialog di fatto non funzionava).
   Sul percorso hotkey Windows concede il diritto a chi riceve `WM_HOTKEY`; per
   il percorso menu si usa comunque il trucco `AttachThreadInput` prima di
   `SetForegroundWindow` (helper `_force_foreground`).
-- **UI**: banda header blu + `Entry` filtro + `ttk.Combobox` Tutti/TEST/PROD +
-  `Listbox` risultati con separatori TEST/PROD resi non selezionabili via
-  `itemconfig` (sfondo/selezione identici) e saltati dalla navigazione + riga
-  di stato con il conteggio host e i tasti disponibili.
+- **UI** (stile Windows 11, `gui/widgets.py`): `SearchEntry` con lente e placeholder +
+  selettore segmentato Tutti/TEST/PROD + `ListView` dei risultati. Ogni host ha l'icona di
+  stato del menu tray (cerchio TEST, quadrato PROD, verde se connesso, da
+  `status_provider` = `tracker.active_hosts`); i separatori sono titoli di sezione
+  piccoli, saltati dalla navigazione. Nel piè di pagina: conteggio host e tasti.
 - **Righe condivise**: `build_host_rows()` (sezioni Preferiti/Recenti/ambienti, filtro,
-  rilevanza), `fill_host_listbox()` e `next_host_row()` sono funzioni di modulo, riusate
-  dal pannello host di "Cerca file".
+  rilevanza), `fill_host_listbox(listview, rows, favorites, active)` e `next_host_row()`
+  sono funzioni di modulo, riusate dal pannello host di "Cerca file".
 - **Filtro**: sottostringa case-insensitive, riapplicata a ogni keystroke
   (`trace_add("write")`) e a ogni cambio combo, con ordinamento per rilevanza
   (`_rank`: esatto < prefisso < confine di parola < sottostringa).
@@ -331,19 +359,57 @@ delle righe diversamente dal previsto (il dialog di fatto non funzionava).
 - **Persistenza**: `~/.ssh_connection_prefs.json` salva l'ultimo ambiente
   scelto **esplicitamente** dall'utente. Aprire "Cerca..." dal sottomenu TEST
   (env forzato) senza toccare la combo **non** sovrascrive il default: il flag
-  `_env_touched` è alzato solo da `<<ComboboxSelected>>`.
+  `_env_touched` è alzato solo da un cambio del selettore (`_on_env_changed`).
 - **Smoke test manuale**: `py -m ssh_connection.gui.search_dialog` apre il
   popup con una lista host fittizia.
 
 ### `gui/settings_dialog.py` — dialog Impostazioni
 `Toplevel` dello stesso root Tk del `SearchPopup`: tutte le chiamate passano da
-`SearchPopup.run_on_ui(fn)`, che mette `fn` sulla coda del thread Tk. Schede
-Generale / Preferiti / Notifiche / Info (in Generale anche il tema scuro, vedi `gui/theme.py`). La scorciatoia si cattura da un campo
-(`binding_from_keys` usa il VK di `event.keycode`, indipendente dal layout) e,
-mentre il campo ha il focus, l'hotkey globale è sospesa tramite il callback
-`hotkey_suspend`. I preferiti si modificano su una copia di lavoro (Aggiungi /
-Rimuovi / Su / Giù) salvata con "Salva". `collect()` valida e restituisce i valori;
-`on_save` (tray) può rifiutarli con un messaggio mostrato nel dialog.
+`SearchPopup.run_on_ui(fn)`, che mette `fn` sulla coda del thread Tk. Stile Windows 11:
+`Sidebar` a sinistra e pagine fatte di card (`setting_row`) a destra, con Salva / Annulla in
+basso. Pagine (costruite da `_page_<chiave>`): **Generale** (scorciatoia, avvio
+automatico, keepalive, timeout tunnel), **Aspetto** (tema scuro con anteprima immediata,
+annullata da Annulla; schema console PROD), **Host**, **Utente e password**,
+**Preferiti**, **Notifiche**, **Info**.
+- La scorciatoia si cattura da un campo (`binding_from_keys` usa il VK di
+  `event.keycode`, indipendente dal layout) e, mentre il campo ha il focus, l'hotkey
+  globale è sospesa tramite il callback `hotkey_suspend`.
+- **Host**: a ogni apertura carica una copia di lavoro `SshConfigDocument` del config. In
+  alto gli indirizzi dei jump host; sotto la tabella degli host (jump esclusi) con
+  Aggiungi / Modifica / Elimina. Aggiungi e Modifica aprono `HostForm`, un form modale che
+  chiama `add_host`/`update_host` sulla copia e mostra i `ConfigError` nel form. Rinominare
+  un host aggiorna anche i preferiti.
+- **Utente e password**: campi (password mascherata, con mostra/nascondi) letti con
+  `ConfigLoader.read_maven_credentials_raw()`.
+- **Salva**: `collect()` valida le preferenze; gli indirizzi dei jump host vanno nella
+  copia; `on_save` (tray) può rifiutare le preferenze con un messaggio; poi
+  `_write_files()` scrive il config solo se `dirty` (con backup) e le credenziali solo se
+  cambiate (entrambi i campi obbligatori). Qualunque errore resta nel piè di pagina e il
+  dialog resta aperto. **Annulla** non scrive nulla: la copia viene ricaricata alla
+  prossima apertura.
+- I preferiti si modificano su una copia di lavoro (Aggiungi / Rimuovi / Su / Giù).
+
+### `gui/token_dialog.py` — token 2FA di Init TEST / Init PROD
+Una `Toplevel` per ambiente sul root Tk del `SearchPopup`, costruita nascosta in
+`init_tray` (`_install_token_prompt`, che imposta `InitOrchestrator.token_prompt`). Aprirla
+è un `deiconify`, circa 0,1 s contro i circa 2,8 s del processo PowerShell + WinForms +
+`Add-Type` C# di prima. Segue tema e DPI dell'app. `ask(env, timeout)` è chiamata dal
+thread worker di Init e aspetta su un `threading.Event` la risposta, data sul thread Tk da
+Connetti/Invio (token), Annulla/Esc/chiusura (None) o dal timeout. Una finestra per
+ambiente, così TEST e PROD possono aspettare insieme. Chiamarla dal thread Tk è rifiutato
+perché lo bloccherebbe. Il campo viene svuotato a ogni chiusura.
+
+### `gui/widgets.py` — componenti in stile Windows 11
+Mattoncini riusati da popup, "Cerca file" e Impostazioni, tutti registrati su `theme`:
+`Button` (secondario con bordo da 1 px ottenuto con una cornice, perché `tk.Button` su
+Windows non disegna l'highlight; `primary`; `danger`; `subtle`), `IconButton` (glifi Segoe
+Fluent Icons / MDL2, con `Tooltip`), `Card` + `setting_row`, `Toggle` (interruttore
+legato a una `BooleanVar`), `Segmented`, `SearchEntry`, `Sidebar`, e `ListView`, una
+`ttk.Treeview` con l'API della `tk.Listbox` usata dai dialog (`insert`, `delete(0, "end")`,
+`curselection`, `selection_set`, `see`…). `<<ListboxSelect>>` parte solo per le selezioni
+dell'utente, come in una Listbox, non per `selection_set()`. Le immagini (icone di stato,
+cartella/file, interruttore) sono disegnate con PIL sovracampionato 4x e messe in cache per
+tema e scala.
 
 ### `gui/theme.py` — tema e DPI delle finestre Tk
 Aspetto comune di popup host, "Cerca file" e Impostazioni (tutti sul thread Tk del
@@ -353,14 +419,16 @@ Aspetto comune di popup host, "Cerca file" e Impostazioni (tutti sul thread Tk d
   finestre come bitmap e il testo è sfocato. Tk scala i font in punti; le misure in pixel
   (geometrie, larghezze fisse, `wraplength`, righe Treeview) passano da `px()`, con
   fattore `winfo_fpixels("1i") / 96` calcolato in `init(root)`.
-- **Temi**: `PALETTES["light"]` (colori originali) e `PALETTES["dark"]` (One Half Dark di
-  Windows Terminal); stesso font. I widget sono registrati con un **ruolo**
-  (`style(widget, role)`, `ROLES` → opzioni Tk dalla palette); `use(dark)` riapplica la
+- **Temi**: `PALETTES["light"]` (Windows 11, accento `#005fb8`) e `PALETTES["dark"]`
+  (One Half Dark di Windows Terminal); font Segoe UI in entrambi (`font()`, glifi con
+  `icon_font()`). I widget sono registrati con un **ruolo** e una **superficie**
+  (`style(widget, "label", "card")`: `ROLES[role](palette, colore superficie)` → opzioni
+  Tk); i ruoli dei pulsanti hanno un colore di hover (`HOVER`). `use(dark)` riapplica la
   palette a tutti, ricolora le tendine delle combobox, la barra del titolo
-  (`DwmSetWindowAttribute`) e chiama i listener `on_change` (le liste host rifanno le righe
-  separatore, che hanno colori propri). Stati dinamici via `set_role` (errore, Interrompi,
-  TEST/PROD).
-- **ttk**: tema nativo (`vista`) in chiaro, `clam` configurato in scuro.
+  (`DwmSetWindowAttribute`) e chiama i listener `on_change` (immagini che dipendono dal
+  tema). Stati dinamici via `set_role` (errore, Interrompi, chip TEST/PROD).
+- **ttk**: `clam` ristilizzato in entrambi i temi (combobox piatte, scrollbar sottili senza
+  frecce, Treeview senza bordi con righe da 28 px logici).
 - La preferenza è `dark_theme` in `AppSettings`; `_apply_settings` della tray chiama
   `theme.use()` al salvataggio.
 
@@ -387,8 +455,14 @@ Va ri-applicato a ogni tick perché `update_menu()` ricrea l'handle del menu.
 - **Credenziali**: preferisce `~/.m2/settings.xml` (primo `<server>`: username e
   password); in alternativa `encryptedUser` nel YAML, decifrato con `CryptoUtil`.
   Il prefisso dominio (`netsgroup\`) viene rimosso dallo username.
-- `maven_settings_path()` / `ensure_maven_settings()`: il dialog Impostazioni (scheda Info,
-  "Apri utente e password") apre il file e, se manca, lo crea da un modello. I segnaposto
+- `save_maven_credentials(user, password)`: scrive nel **primo** `<server>` cambiando
+  solo il testo di `<username>`/`<password>` (con escaping XML; li aggiunge dopo `<id>` se
+  mancano). Il resto del file, anche una vera configurazione Maven, resta com'è: i
+  commenti vengono mascherati prima di cercare i tag. Il risultato viene validato con il
+  parser XML prima della scrittura atomica. `read_maven_credentials_raw()` restituisce i
+  valori grezzi (dominio incluso, segnaposto = vuoto) per il dialog.
+- `maven_settings_path()` / `ensure_maven_settings()`: "Apri file" (pagine Utente e password
+  e Info) apre il file in Blocco note e, se manca, lo crea da un modello. I segnaposto
   `INSERISCI_*` non compilati equivalgono a credenziali assenti. `_find()` cerca con e senza
   namespace Maven (confronto `is not None`: un `Element` senza figli è falsy).
 

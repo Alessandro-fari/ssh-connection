@@ -432,18 +432,17 @@ def test_file_search_dialog():
 
         # --- dark theme: switching repaints the open window -------------------
         def colors():
-            sep = next(i for i, r in enumerate(dlg._host_rows) if r["type"] == "sep")
             out.update(status=dlg._status_label.cget("fg"), bg=dlg._top.cget("bg"),
-                       sep=dlg._host_list.itemcget(sep, "bg"))
+                       sep=str(dlg._host_list.tree.tag_configure("sep", "foreground")))
         on_ui(lambda: (theme.use(True), colors()))
         dark = theme.PALETTES["dark"]
         check("dark theme repaints window, error status and separator rows",
-              (out["bg"], out["status"], out["sep"]) == (dark["bg"], dark["error"], dark["sep_bg"]),
+              (out["bg"], out["status"], out["sep"]) == (dark["bg"], dark["error"], dark["sep_fg"]),
               str(out))
         on_ui(lambda: (theme.use(False), colors()))
         light = theme.PALETTES["light"]
         check("back to the light theme",
-              (out["bg"], out["status"], out["sep"]) == (light["bg"], light["error"], light["sep_bg"]),
+              (out["bg"], out["status"], out["sep"]) == (light["bg"], light["error"], light["sep_fg"]),
               str(out))
 
         # --- host panel: typing, env filter, arrows, Ctrl+D -----------------
@@ -512,7 +511,7 @@ def test_file_search_dialog():
         time.sleep(0.4)
         on_ui(lambda: (popup._var_filter.set("stlit1pf"), popup._file_search()))
         check("Ctrl+F opens file search on the selected host", opened == ["stlit1pf01"], str(opened))
-        on_ui(lambda: out.update(status=popup._var_status.get()))
+        on_ui(lambda: out.update(status=popup._hints.cget("text")))
         check("popup hints Ctrl+F", "Ctrl+F" in out["status"])
     finally:
         FakeSession.delay = 0.0

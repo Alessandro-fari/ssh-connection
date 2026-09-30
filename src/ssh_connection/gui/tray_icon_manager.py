@@ -320,6 +320,15 @@ class TrayIconManager:
                 host_provider=self._search_hosts)
         return self._file_search
 
+    def _install_token_prompt(self) -> None:
+        """Init TEST / PROD ask their 2FA token in a pre-built, themed Tk
+        window (instant) instead of a PowerShell WinForms process."""
+        from ..ssh.init_orchestrator import INIT_ENVS, InitOrchestrator
+        from .token_dialog import TokenDialog
+        dialog = TokenDialog(self._ensure_search_popup(), INIT_ENVS)
+        dialog.prewarm()
+        InitOrchestrator.token_prompt = dialog.ask
+
     def _suspend_hotkey(self, suspend: bool) -> None:
         """While the settings dialog captures a new combination the global
         hotkey is released, otherwise pressing it would open the search
@@ -410,7 +419,8 @@ class TrayIconManager:
             self._search_popup = SearchPopup(
                 host_provider=self._search_hosts,
                 on_select=self._on_search_selected,
-                on_file_search=self.open_file_search_on)
+                on_file_search=self.open_file_search_on,
+                status_provider=tracker.active_hosts)
             self._search_popup.start()
         return self._search_popup
 
@@ -514,6 +524,10 @@ class TrayIconManager:
                 self._ensure_settings_dialog()   # built hidden on the same Tk thread
             except Exception as e:
                 logging.warning(f"Settings dialog pre-warm failed: {e}")
+            try:
+                self._install_token_prompt()     # Init token window, same Tk thread
+            except Exception as e:
+                logging.warning(f"Token prompt pre-warm failed: {e}")
 
             # Global hotkey (configurable, default Ctrl+Shift+Space) opens
             # the host search popup.

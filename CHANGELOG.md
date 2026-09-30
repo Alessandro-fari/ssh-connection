@@ -26,6 +26,40 @@ annotati nella voce stessa. Formato ispirato a [Keep a Changelog](https://keepac
     la ricerca pre-filtrata, che l'hotkey globale non fa.
 
 ### Modificato
+- **2026-09-30** — **Finestra del token di Init TEST / Init PROD istantanea e a tema.**
+  Era un dialog WinForms lanciato come processo PowerShell: circa **2,8 s** misurati
+  prima ancora che esistesse la finestra (avvio di powershell.exe, caricamento degli
+  assembly, compilazione C# dell'`Add-Type` per il primo piano). In più ignorava il tema
+  ed era sfocato, perché non era DPI aware. Ora è una finestra Tk pre-caricata sul thread
+  del popup (`gui/token_dialog.py`) e appare in circa **0,1 s**.
+  - Stesso stile delle altre finestre: chip TEST/PROD, host che verranno aperti, token
+    mascherato con mostra/nascondi, Invio = Connetti, Esc = Annulla. Il token vuoto è
+    rifiutato nella finestra.
+  - L'orchestratore la usa tramite `InitOrchestrator.token_prompt`, installato dalla
+    tray; senza tray (CLI) resta il dialog PowerShell. Il vecchio motivo per non usare Tk
+    (un root Tk su un thread worker disturbava la tray) non vale più: il thread Tk del
+    popup esiste già ed è stabile.
+  - Una finestra per ambiente (TEST e PROD possono aspettare insieme), timeout 300 s,
+    campo svuotato a ogni chiusura. Test: `tests/test_token_dialog.py`.
+- **2026-09-30** — **Nuovo aspetto in stile Windows 11** per Cerca host, Cerca file e
+  Impostazioni (la UI precedente era poco curata: bande blu, bordi neri, liste fitte).
+  - *Impostazioni*: barra di navigazione a sinistra (Generale, Aspetto, Host, Utente e
+    password, Preferiti, Notifiche, Info) e pagine fatte di card con titolo, descrizione e
+    controllo a destra. Interruttori on/off al posto delle caselle. Il **tema scuro** ha
+    l'anteprima immediata e Annulla la toglie.
+  - *Cerca host*: campo di ricerca con lente e placeholder, selettore segmentato
+    Tutti/TEST/PROD, righe più alte con l'**icona di stato** del menu tray (cerchio TEST /
+    quadrato PROD, verde se connesso), sezioni come piccoli titoli.
+  - *Cerca file*: pannello host come barra laterale, pulsanti icona con tooltip per
+    indietro/su/home/aggiorna, filtri con placeholder, chip TEST/PROD, icone cartella/file
+    disegnate, tabella senza bordi pesanti.
+  - Nuovo `gui/widgets.py` (Button, IconButton, Tooltip, Card, setting_row, Toggle,
+    Segmented, SearchEntry, Sidebar, ListView). `ListView` è una Treeview con l'API della
+    Listbox, così la logica di popup, pannello host e preferiti non è cambiata.
+    `gui/theme.py` ha ora palette Windows 11 / One Half Dark con superfici (bg, card, nav),
+    colori di hover e ttk `clam` ristilizzato in entrambi i temi.
+  - I pulsanti secondari hanno un bordo da 1 px ottenuto con una cornice: `tk.Button` su
+    Windows ignora `highlightthickness`.
 - **2026-09-30** — Scheda **Notifiche** spostata dopo **Preferiti** (ordine: Generale,
   Preferiti, Notifiche, Info): i preferiti si usano più spesso delle notifiche.
 - **2026-09-28** — **"Apri utente e password" nella scheda Info** delle Impostazioni.
@@ -89,8 +123,6 @@ annotati nella voce stessa. Formato ispirato a [Keep a Changelog](https://keepac
     copia `.pgp` in `files/cache/outgoing/completed`) in 1,4 s.
   - Test di regressione sulla presenza di `-L`. Il test locale con `sh` non può creare
     link simbolici veri su Windows senza privilegi.
-
-### Corretto
 - **2026-09-30** — **Finestre sfocate** su schermi con ridimensionamento (es. 125%). Il
   processo non dichiarava la *DPI awareness*: Windows disegnava le finestre Tk a 96 DPI e
   le ingrandiva come bitmap, con testo impastato. Ora `main.py` chiama
@@ -105,6 +137,34 @@ annotati nella voce stessa. Formato ispirato a [Keep a Changelog](https://keepac
   - Anche il menu tray e le sue icone di stato (`SM_CXMENUCHECK`) sono ora nitidi.
 
 ### Aggiunto
+- **2026-09-30** — **Host, jump host e credenziali modificabili dalle Impostazioni**, senza
+  aprire i file a mano (richiesta d'uso: ogni nuovo server voleva due modifiche coordinate
+  nel config, tunnel sul jump host e voce Host, fatte in Blocco note).
+  - *Impostazioni → Host*: indirizzi di `login_test` / `login_prod` e tabella degli host
+    con ricerca. **Aggiungi host** chiede ambiente, nome, descrizione, server di
+    destinazione (vuoto = uguale al nome), porta SSH e porta locale (vuoto = la prima
+    libera). Crea `LocalForward <porta> <server>:22` sul jump host e il blocco
+    `Host … HostName localhost / Port <porta>` in fondo alla sezione. **Modifica**
+    (anche rinomina, che aggiorna i preferiti) ed **Elimina** agiscono su entrambi.
+  - Nuovo `ssh/ssh_config_editor.py` (`SshConfigDocument`). Modifica solo le righe
+    coinvolte copiandone l'indentazione: commenti, tab, CRLF/BOM, blocchi `Host *it1tf*`
+    dei DB e note restano identici (verificato sul config reale: il diff contiene solo le
+    righe attese e `ssh -G` legge i nuovi tunnel). Validazioni: nome unico, porte libere
+    anche rispetto ai tunnel DB wildcard, descrizione che non nomina l'altro ambiente
+    (altrimenti il parser cambierebbe sezione).
+  - *Sicurezza del file*: si scrive solo con **Salva**; prima `config.bak`, poi la
+    sostituzione atomica. Se il config è cambiato su disco dopo l'apertura delle
+    Impostazioni il salvataggio si rifiuta invece di sovrascrivere.
+  - *Impostazioni → Utente e password*: nome utente e password (mascherata, con
+    mostra/nascondi) al posto di Blocco note. `ConfigLoader.save_maven_credentials` cambia
+    solo il testo di `<username>`/`<password>` del primo `<server>` di `~/.m2/settings.xml`
+    (con escaping XML) e lascia intatto il resto, anche una vera configurazione Maven.
+  - **Trovato nel config reale**: `travelit1pe05` è definito **due volte** in PROD
+    (porta 3229 e porta 3238, verso `travelit1te05`). ssh usa solo il primo blocco. La
+    tabella lo segnala ("definito due volte!") e non lo modifica: va corretto a mano.
+  - Test: nuovo `tests/test_config_editor.py` (55 controlli: modello, aggiunta, modifica,
+    eliminazione, validazioni, CRLF/BOM, backup, modifica concorrente, credenziali,
+    Salva/Annulla del dialog), tutto su file temporanei.
 - **2026-09-30** — **Tema scuro One Half Dark** per le finestre dell'app (Cerca host,
   Cerca file, Impostazioni), attivabile in *Impostazioni → Generale → "Tema scuro (One
   Half Dark)"* (preferenza `dark_theme`, default spento). Palette dello schema One Half
@@ -277,6 +337,14 @@ annotati nella voce stessa. Formato ispirato a [Keep a Changelog](https://keepac
   moduli e `paramiko` siano inclusi. Il primo tentativo era fallito perché l'exe in
   esecuzione nella tray era bloccato ("Accesso negato"): prima del build va chiusa
   l'app.
+- **2026-09-30** — Build release (`dist/SSH-Connection-Manager.exe`) con UI in stile
+  Windows 11, tema scuro, finestre nitide (DPI), editor di host / jump host / credenziali
+  nelle Impostazioni e finestra del token di Init istantanea. Verificato nel `PYZ` che
+  `gui.theme`, `gui.widgets`, `gui.token_dialog`, `ssh.ssh_config_editor` e `PIL.ImageTk`
+  siano inclusi. Prova di avvio con `--autostart`: tray avviata senza errori di import.
+  L'unico errore nel log, `RegisterHotKey` 1409, veniva dall'istanza avviata da
+  sorgente (`py run.py`) che teneva già la scorciatoia. `.zip` e `-DEBUG.exe` non
+  rigenerati.
 
 - **2026-09-28** — **Dialog Impostazioni** (voce di menu **"Impostazioni..."**, ex
   "Settings"). Prima la voce apriva solo `~/.ssh/config` in Notepad; ora apre un
