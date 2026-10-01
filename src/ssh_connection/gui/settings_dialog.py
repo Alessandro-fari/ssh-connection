@@ -10,10 +10,11 @@ interpreter with its own mainloop — sharing one thread avoids both issues.
 The window is built hidden at startup; opening it only reloads the values
 and deiconifies it, so it appears instantly. Closing only hides it.
 
-Pages: Generale (hotkey, autostart, keepalive, tunnel timeout), Aspetto
+Pages: Generale (hotkey, autostart, text editor, keepalive, tunnel timeout), Aspetto
 (dark theme — previewed at once, reverted by Annulla — and the PROD console
 scheme), Host (jump host addresses, add / edit / delete hosts of
-~/.ssh/config through `SshConfigDocument`), Utente e password (fields
+~/.ssh/config through `SshConfigDocument`, each with its extra forwarded
+ports), Utente e password (fields
 written into ~/.m2/settings.xml), Preferiti, Notifiche, Info.
 
 Nothing is written before "Salva": host edits change an in-memory copy of
@@ -37,8 +38,8 @@ from ..config import autostart
 from ..config.app_settings import DEFAULTS, LIMITS, NOTIFICATION_KINDS, AppSettings
 from ..config.config_loader import ConfigLoader
 from ..ssh import console_themes
-from ..ssh.ssh_config_editor import ENVS, ConfigError, HostEntry, SshConfigDocument
-from . import theme
+from ..ssh.ssh_config_editor import ENVS, ConfigError, HostEntry, PortForward, SshConfigDocument
+from . import text_editor, theme
 from .hotkey_manager import KEYS, MODIFIERS, parse_binding
 from .search_dialog import _force_foreground
 from .theme import px
@@ -209,6 +210,26 @@ class SettingsDialog:
                       control=lambda p: w.Toggle(p, self._var_autostart),
                       textvariable=self._var_autostart_hint)
 
+        self._var_editor = tk.StringVar()
+        self._editor_choices: List[Tuple[str, str]] = []
+
+        def editor_control(parent):
+            from tkinter import ttk
+            box = theme.style(tk.Frame(parent), "window", "card")
+            self._editor_combo = theme.style(
+                ttk.Combobox(box, textvariable=self._var_editor, state="readonly", width=24,
+                             font=theme.font(10)), "combo")
+            self._editor_combo.pack(side="left")
+            w.Button(box, "Sfoglia...", self._browse_editor, surface="card").pack(
+                side="left", padx=(px(8), 0))
+            return box
+        _, _, desc = w.setting_row(
+            card, "Editor dei file di testo",
+            "Per i pulsanti Apri (config, log...) e i file di Cerca file. "
+            "\"Chiedi ogni volta\": scelta con Solo questa volta / Sempre.",
+            control=editor_control)
+        desc.configure(wraplength=px(300))     # the combo + button take the rest
+
         w.section_title(page, "Connessioni").pack(fill="x", pady=(px(18), px(6)))
         card = w.Card(page)
         card.pack(fill="x")
@@ -289,13 +310,13 @@ class SettingsDialog:
                 textvariable=self._var_hosts_hint).pack(side="bottom", fill="x", pady=(px(6), 0))
         tframe = theme.style(tk.Frame(page), "field_frame")
         tframe.pack(fill="both", expand=True)
-        cols = (("env", "Ambiente", 80), ("dest", "Server", 170), ("port", "Porta locale", 90),
-                ("desc", "Descrizione", 220))
+        cols = (("env", "Ambiente", 75), ("dest", "Server", 130), ("port", "Porta locale", 85),
+                ("fwd", "Porte inoltrate", 120), ("desc", "Descrizione", 160))
         tree = theme.style(ttk.Treeview(tframe, columns=[c for c, _, _ in cols],
                                         show="tree headings", selectmode="browse", height=8),
                            "tree")
         tree.heading("#0", text="Nome", anchor="w")
-        tree.column("#0", width=px(150), stretch=False)
+        tree.column("#0", width=px(140), stretch=False)
         for c, title, width in cols:
             tree.heading(c, text=title, anchor="w")
             tree.column(c, width=px(width), anchor="w", stretch=(c == "desc"))
@@ -421,6 +442,7 @@ class SettingsDialog:
         self._prod_theme_combo["values"] = names
         self._var_prod_theme.set(scheme)
         self._var_dark.set(cfg["dark_theme"])
+        self._load_editors(cfg["text_editor"])
         for kind, v in self._notif_vars.items():
             v.set(cfg["notifications"].get(kind, True))
 
@@ -481,7 +503,9 @@ class SettingsDialog:
             top.geometry(f"{w}x{h}+{x}+{y}")
         top.deiconify()
         top.lift()
-        top.attributes("-topmost", True)
+        # Brought to the front once, not kept on top: other apps opened
+        # afterwards go above it, like any window (same as Cerca file).
+        top.attributes("-topmost", False)
         top.update_idletasks()
         try:
             _force_foreground(int(top.wm_frame(), 16))
@@ -582,7 +606,9 @@ class SettingsDialog:
                 dest = h.hostname + (f":{h.port}" if h.port else "")
                 port = "diretto"
             desc = h.description + ("  (definito due volte!)" if h.duplicate else "")
-            tree.insert("", "end", iid=iid, text=h.name, values=(h.env, dest, port, desc))
+            fwd = ", ".join(str(f.local_port) for f in self._doc.forwards(h.name)) \
+                if not h.duplicate else ""
+            tree.insert("", "end", iid=iid, text=h.name, values=(h.env, dest, port, fwd, desc))
         n = len(tree.get_children())
         pending = "  Modifiche non ancora salvate: premi Salva." if (self._doc and
                                                                    self._doc.dirty) else ""
@@ -743,19 +769,55 @@ class SettingsDialog:
         else:
             self._var_info.set("Le credenziali sono lette dal primo <server> del file. "
                                "Le modifiche valgono dalla prossima connessione.")
-        # Notepad, not the default .xml handler (often a browser, read-only).
-        try:
-            import subprocess
-            subprocess.Popen(["notepad.exe", str(path)], stdin=subprocess.DEVNULL)
-        except OSError:
-            self._open(path)
+        # The text editor, not the default .xml handler (often a browser).
+        self._open(path)
 
-    @staticmethod
-    def _open(path: Path) -> None:
+    def _open(self, path: Path) -> None:
+        """Config, credentials, preferences, log: in the text editor (asked
+        with "Apri con" if none is saved)."""
         try:
-            os.startfile(path)
+            text_editor.open_text(path, getattr(self, "_top", None))
         except Exception as e:
-            logging.error(f"Cannot open {path}: {e}")
+            logging.error(f"Cannot open {path}: {e}", exc_info=True)
+        # "Sempre" in the chooser saved an editor: show it in Generale too
+        if getattr(self, "_editor_combo", None) is not None:
+            self._load_editors(AppSettings.get("text_editor"), keep_selection=True)
+
+    # ------------------------------------------------------------------
+    # Text editor (Generale)
+
+    def _load_editors(self, saved: str, keep_selection: bool = False) -> None:
+        """Fill the editor combo: Chiedi ogni volta, the editors found, the
+        saved one (even if not found any more)."""
+        current = self._var_editor.get() if keep_selection else None
+        found = text_editor.find_editors()
+        choices = [(text_editor.ASK_LABEL, text_editor.ASK)] + found
+        if saved and not any(os.path.normcase(exe) == os.path.normcase(saved)
+                             for _, exe in found):
+            missing = "" if Path(saved).is_file() else " (non trovato)"
+            choices.append((f"{text_editor.editor_label(saved)} - {saved}{missing}", saved))
+        self._editor_choices = choices
+        self._editor_combo["values"] = [label for label, _ in choices]
+        if keep_selection and current and current != text_editor.ASK_LABEL:
+            self._var_editor.set(current)
+            return
+        label = next((l for l, exe in choices
+                      if os.path.normcase(exe) == os.path.normcase(saved or "")),
+                     text_editor.ASK_LABEL)
+        self._var_editor.set(label)
+
+    def _browse_editor(self) -> None:
+        exe = text_editor.browse_executable(self._top)
+        if not exe:
+            return
+        for label, known in self._editor_choices:
+            if os.path.normcase(known) == os.path.normcase(exe):
+                self._var_editor.set(label)
+                return
+        label = f"{text_editor.editor_label(exe)} - {exe}"
+        self._editor_choices.append((label, exe))
+        self._editor_combo["values"] = [l for l, _ in self._editor_choices]
+        self._var_editor.set(label)
 
     # ------------------------------------------------------------------
     # Save
@@ -780,6 +842,8 @@ class SettingsDialog:
         values["autostart"] = self._var_autostart.get()
         values["prod_console_theme"] = self._var_prod_theme.get() or console_themes.NO_THEME
         values["dark_theme"] = self._var_dark.get()
+        values["text_editor"] = dict((label, exe) for label, exe in self._editor_choices).get(
+            self._var_editor.get(), text_editor.ASK)
         return values, None
 
     def _apply_jump_hosts(self) -> Optional[str]:
@@ -910,6 +974,8 @@ class HostForm:
             field("hostname", "HostName", "Nome o indirizzo IP del server.", entry.hostname)
             field("port", "Porta", "Vuoto = 22.", str(entry.port or ""), width=8)
 
+        self._build_forwards(body, w, tk)
+
         self._var_error = tk.StringVar()
         w.label(body, "", "error", size=9, anchor="w", justify="left", wraplength=px(440),
                 textvariable=self._var_error).pack(fill="x", pady=(px(10), 0))
@@ -925,9 +991,100 @@ class HostForm:
         x = dlg._top.winfo_rootx() + (dlg._top.winfo_width() - top.winfo_reqwidth()) // 2
         y = dlg._top.winfo_rooty() + max(0, (dlg._top.winfo_height() - top.winfo_reqheight()) // 3)
         top.geometry(f"+{max(0, x)}+{max(0, y)}")
-        top.attributes("-topmost", True)
-        top.grab_set()
+        top.grab_set()          # transient: stays above its parent, not above other apps
         name_entry.focus_set()
+
+    # ------------------------------------------------------------------
+    # Forwarded ports (LocalForward lines of the host's own block)
+
+    def _build_forwards(self, body, w, tk) -> None:
+        from tkinter import ttk
+        self._forwards: List[PortForward] = ([] if self._entry is None
+                                             else self._doc.forwards(self._entry.name))
+        self._forwards_loaded = list(self._forwards)
+        head = theme.style(tk.Frame(body), "window")
+        head.pack(fill="x", pady=(px(16), px(2)))
+        w.section_title(head, "Porte inoltrate").pack(side="left")
+        w.Button(head, "Elimina", self._delete_forward).pack(side="right")
+        w.Button(head, "Modifica...", self._edit_forward).pack(side="right", padx=(px(8), px(8)))
+        w.Button(head, "Aggiungi porta...", self._add_forward).pack(side="right")
+        w.label(body, "Altre porte aperte con la sessione di questo host (LocalForward nel suo "
+                "blocco), oltre al tunnel. Valgono dalla prossima connessione.", "hint", size=9,
+                anchor="w", justify="left", wraplength=px(440)).pack(fill="x", pady=(0, px(6)))
+        tframe = theme.style(tk.Frame(body), "field_frame")
+        tframe.pack(fill="x")
+        cols = (("dest", "Destinazione", 150), ("desc", "Descrizione", 170))
+        tree = theme.style(ttk.Treeview(tframe, columns=[c for c, _, _ in cols],
+                                        show="tree headings", selectmode="browse", height=4),
+                           "tree")
+        tree.heading("#0", text="Porta locale", anchor="w")
+        tree.column("#0", width=px(90), stretch=False)
+        for c, title, width in cols:
+            tree.heading(c, text=title, anchor="w")
+            tree.column(c, width=px(width), anchor="w", stretch=(c == "desc"))
+        tree.pack(side="left", fill="both", expand=True, padx=1, pady=1)
+        sb = ttk.Scrollbar(tframe, orient="vertical", command=tree.yview)
+        sb.pack(side="right", fill="y", pady=1)
+        tree.configure(yscrollcommand=sb.set)
+        tree.bind("<Double-Button-1>", lambda e: self._edit_forward())
+        tree.bind("<Return>", lambda e: (self._edit_forward(), "break")[1])
+        tree.bind("<Delete>", lambda e: self._delete_forward())
+        self._fwd_tree = tree
+        self._refresh_forwards()
+
+    def _refresh_forwards(self, select: Optional[int] = None) -> None:
+        tree = self._fwd_tree
+        tree.delete(*tree.get_children())
+        for i, f in enumerate(self._forwards):
+            tree.insert("", "end", iid=str(i), text=str(f.local_port),
+                        values=(f"{f.dest}:{f.dest_port or f.local_port}", f.description))
+        if select is not None and tree.exists(str(select)):
+            tree.selection_set(str(select))
+            tree.focus(str(select))
+            tree.see(str(select))
+
+    def _selected_forward(self) -> Optional[int]:
+        sel = self._fwd_tree.selection()
+        return int(sel[0]) if sel else None
+
+    def _host_name(self) -> str:
+        return self._vars["name"].get().strip() or (self._entry.name if self._entry else "")
+
+    def _env(self) -> str:
+        return self._entry.env if self._entry else self._var_env.get()
+
+    def _add_forward(self) -> None:
+        ForwardForm(self, None).open()
+
+    def _edit_forward(self) -> None:
+        idx = self._selected_forward()
+        if idx is None:
+            self._var_error.set("Seleziona una porta da modificare.")
+            return
+        ForwardForm(self, idx).open()
+
+    def _delete_forward(self) -> None:
+        idx = self._selected_forward()
+        if idx is None:
+            self._var_error.set("Seleziona una porta da eliminare.")
+            return
+        del self._forwards[idx]
+        self._var_error.set("")
+        self._refresh_forwards(select=min(idx, len(self._forwards) - 1))
+
+    def check_forwards(self, forwards: List[PortForward]):
+        """(normalized forwards, warnings) or raises ConfigError."""
+        return self._doc.check_forwards(self._host_name(), self._env(), forwards,
+                                        current=self._entry.name if self._entry else None)
+
+    def set_forward(self, idx: Optional[int], forward: PortForward) -> None:
+        if idx is None:
+            self._forwards.append(forward)
+            idx = len(self._forwards) - 1
+        else:
+            self._forwards[idx] = forward
+        self._var_error.set("")
+        self._refresh_forwards(select=idx)
 
     def _update_port_hint(self) -> None:
         if not hasattr(self, "_port_row_desc"):
@@ -942,6 +1099,7 @@ class HostForm:
     def _ok(self) -> None:
         v = {k: var.get().strip() for k, var in self._vars.items()}
         doc, entry = self._doc, self._entry
+        snapshot = (list(doc.lines), doc.dirty)   # host + ports: all or nothing
         try:
             if entry is None:
                 result = doc.add_host(self._var_env.get(), v["name"], dest=v["dest"],
@@ -957,7 +1115,10 @@ class HostForm:
             else:
                 result = doc.update_host(entry.name, new_name=v["name"], hostname=v["hostname"],
                                          port=v["port"] or None, description=v["description"])
+            if result is not None and self._forwards != self._forwards_loaded:
+                doc.set_forwards(result.name, self._forwards)
         except ConfigError as e:
+            doc.lines[:], doc.dirty = snapshot
             self._var_error.set(str(e))
             return
         dlg = self._dlg
@@ -968,3 +1129,108 @@ class HostForm:
         dlg._var_error.set("")
         dlg._refresh_host_table(select=result.name if result else None)
         self._top.destroy()
+
+
+class ForwardForm:
+    """Small modal form over HostForm: one forwarded port."""
+
+    def __init__(self, host_form: HostForm, idx: Optional[int]):
+        self._form = host_form
+        self._idx = idx
+        self._fwd = host_form._forwards[idx] if idx is not None else None
+
+    def open(self) -> None:
+        import tkinter as tk
+
+        from . import widgets as w
+        parent, f = self._form._top, self._fwd
+        top = tk.Toplevel(parent)
+        self._top = top
+        title = "Nuova porta inoltrata" if f is None else f"Porta {f.local_port}"
+        top.title(title)
+        theme.toplevel(top)
+        top.transient(parent)
+        top.resizable(False, False)
+        body = theme.style(tk.Frame(top, padx=px(24), pady=px(20)), "window")
+        body.pack(fill="both", expand=True)
+        w.page_title(body, title).pack(fill="x")
+        w.label(body, "Come una riga LocalForward: la porta locale del PC porta a "
+                "destinazione:porta vista dall'host.", "hint", size=9, anchor="w",
+                justify="left", wraplength=px(400)).pack(fill="x", pady=(px(2), px(14)))
+        card = w.Card(body)
+        card.pack(fill="x")
+        self._vars: Dict[str, tk.StringVar] = {}
+
+        def field(key, title, desc, value, width, first=False):
+            var = tk.StringVar(value=value)
+            self._vars[key] = var
+            _, e, _ = w.setting_row(card, title, desc, first=first, control=lambda p: theme.style(
+                tk.Entry(p, textvariable=var, font=theme.font(10), width=width), "entry"))
+            e.grid_configure(ipady=px(4))
+            return e
+
+        first = field("local_port", "Porta locale", "La porta da usare sul PC (localhost).",
+                      "" if f is None else str(f.local_port), 8, first=True)
+        field("dest", "Destinazione", "Nome o IP visto dall'host. Vuoto = localhost (l'host "
+              "stesso).", "" if f is None or f.dest == "localhost" else f.dest, 22)
+        field("dest_port", "Porta remota", "Vuoto = uguale alla porta locale.",
+              "" if f is None or f.dest_port == f.local_port else str(f.dest_port), 8)
+        field("description", "Descrizione", "Facoltativa, scritta come commento sopra la riga.",
+              "" if f is None else f.description, 26)
+
+        self._var_error = tk.StringVar()
+        w.label(body, "", "error", size=9, anchor="w", justify="left", wraplength=px(400),
+                textvariable=self._var_error).pack(fill="x", pady=(px(10), 0))
+        btns = theme.style(tk.Frame(body), "window")
+        btns.pack(fill="x", pady=(px(10), 0))
+        w.Button(btns, "Aggiungi" if f is None else "Applica", self._ok, "primary",
+                 width=10).pack(side="right")
+        w.Button(btns, "Annulla", self._close, width=10).pack(side="right", padx=(0, px(8)))
+        top.bind("<Escape>", lambda e: self._close())
+        top.bind("<Return>", lambda e: (self._ok(), "break")[1])
+        top.protocol("WM_DELETE_WINDOW", self._close)
+
+        top.update_idletasks()
+        x = parent.winfo_rootx() + (parent.winfo_width() - top.winfo_reqwidth()) // 2
+        y = parent.winfo_rooty() + max(0, (parent.winfo_height() - top.winfo_reqheight()) // 3)
+        top.geometry(f"+{max(0, x)}+{max(0, y)}")
+        top.grab_set()          # transient: stays above its parent, not above other apps
+        first.focus_set()
+
+    def _close(self) -> None:
+        self._top.destroy()
+        try:
+            self._form._top.grab_set()      # back to the host form's modality
+        except Exception:
+            pass
+
+    def _ok(self) -> None:
+        from tkinter import messagebox
+        v = {k: var.get().strip() for k, var in self._vars.items()}
+        if not v["local_port"].isdigit():
+            self._var_error.set("Porta locale: inserire un numero.")
+            return
+        if v["dest_port"] and not v["dest_port"].isdigit():
+            self._var_error.set("Porta remota: inserire un numero.")
+            return
+        old = self._fwd
+        fwd = PortForward(int(v["local_port"]), v["dest"] or "localhost",
+                          int(v["dest_port"]) if v["dest_port"] else None, v["description"],
+                          bind=old.bind if old else "", origin=old.origin if old else None)
+        candidate = list(self._form._forwards)
+        if self._idx is None:
+            candidate.append(fwd)
+        else:
+            candidate[self._idx] = fwd
+        try:
+            normalized, warnings = self._form.check_forwards(candidate)
+        except ConfigError as e:
+            self._var_error.set(str(e))
+            return
+        fwd = normalized[len(candidate) - 1 if self._idx is None else self._idx]
+        mine = [m for m in warnings if f" {fwd.local_port} " in m]
+        if mine and not messagebox.askyesno("Porta già usata", mine[0] + "\n\nContinuare?",
+                                            parent=self._top):
+            return
+        self._form.set_forward(self._idx, fwd)
+        self._close()

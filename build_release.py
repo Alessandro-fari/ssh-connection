@@ -88,6 +88,7 @@ def build_exe():
         "--hiddenimport", "ssh_connection.gui.theme",
         "--hiddenimport", "ssh_connection.gui.widgets",
         "--hiddenimport", "ssh_connection.gui.token_dialog",
+        "--hiddenimport", "ssh_connection.gui.text_editor",
         "--hiddenimport", "ssh_connection.ssh.ssh_config_editor",
         "--hiddenimport", "ssh_connection.ssh.ssh_config_parser",
         "--hiddenimport", "ssh_connection.ssh.ssh_launcher",

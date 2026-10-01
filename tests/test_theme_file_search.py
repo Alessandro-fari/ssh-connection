@@ -292,7 +292,8 @@ def test_file_search_dialog():
     real = (fsd.RemoteSession, fsd.FileSearchDialog._open_local, fsd.OPEN_DIR, fsd.route_ready)
     fsd.RemoteSession = FakeSession
     local_opened = []
-    fsd.FileSearchDialog._open_local = staticmethod(local_opened.append)
+    fsd.FileSearchDialog._open_local = staticmethod(
+        lambda path, parent=None: local_opened.append(path) or True)
     fsd.OPEN_DIR = TMP / "open"
     fsd.route_ready = lambda host: ready["value"]
     try:
@@ -595,7 +596,11 @@ def test_formatting():
     from ssh_connection.gui import file_search_dialog as fsd
     check("bytes", fsd.format_size(512) == "512 B")
     check("megabytes", fsd.format_size(5 * 1024 * 1024) == "5.0 MB")
-    real_dir, real_handoff = fsd.OPEN_DIR, fsd.NOTEPAD_HANDOFF_SECONDS
+    from ssh_connection.gui import text_editor
+    real_dir, real_handoff = fsd.OPEN_DIR, fsd.EDITOR_HANDOFF_SECONDS
+    real_chooser = text_editor.EditorChooser.ask
+    notepad = text_editor.notepad_path()
+    AppSettings.update(text_editor=notepad)          # saved with "Sempre"
     fsd.OPEN_DIR = TMP / "open2"
 
     def copy(host, name):
@@ -605,7 +610,7 @@ def test_formatting():
         return p
 
     class FakeNotepad:
-        def __init__(self, args):
+        def __init__(self, args, **kw):
             launched.append(args)
 
         def wait(self):
@@ -615,19 +620,38 @@ def test_formatting():
     real_popen, real_start = fsd.subprocess.Popen, fsd.os.startfile
     fsd.subprocess.Popen, fsd.os.startfile = FakeNotepad, started.append
     try:
-        fsd.NOTEPAD_HANDOFF_SECONDS = 0.1
+        fsd.EDITOR_HANDOFF_SECONDS = 0.1
         log = copy("h", "app.log.1")
         fsd.FileSearchDialog._open_local(log)
         time.sleep(1)
-        check("text files open in Notepad", launched == [["notepad.exe", str(log)]], str(launched))
-        check("copy deleted when Notepad closes", not log.parent.exists()
+        check("text files open in the saved editor", launched == [[notepad, str(log)]],
+              str(launched))
+        check("copy deleted when the editor closes", not log.parent.exists()
               and not (fsd.OPEN_DIR / "h").exists())
 
-        fsd.NOTEPAD_HANDOFF_SECONDS = 60
+        fsd.EDITOR_HANDOFF_SECONDS = 60
         handed = copy("h", "b.log")
         fsd.FileSearchDialog._open_local(handed)
         time.sleep(1)
-        check("copy kept when Notepad hands off to another window", handed.exists())
+        check("copy kept when the editor hands off to another window", handed.exists())
+
+        # No editor saved: "Apri con" is asked; cancelled = not opened, copy removed
+        AppSettings.update(text_editor="")
+        asked = []
+        text_editor.EditorChooser.ask = lambda self: asked.append(self._file_name)
+        launched.clear()
+        cancelled = copy("h", "c.log")
+        opened = fsd.FileSearchDialog._open_local(cancelled)
+        check("no editor saved: Apri con is asked, cancel opens nothing",
+              asked == ["c.log"] and not opened and not launched and not cancelled.exists(),
+              str((asked, opened, launched)))
+        text_editor.EditorChooser.ask = lambda self: "C:\\x\\klogg.exe"
+        once = copy("h", "d.log")
+        fsd.FileSearchDialog._open_local(once)
+        check("Solo questa volta: opened with it, nothing saved",
+              launched == [["C:\\x\\klogg.exe", str(once)]]
+              and AppSettings.get("text_editor") == "", str(launched))
+        AppSettings.update(text_editor=notepad)
 
         gz = copy("h", "app.log.gz")
         fsd.FileSearchDialog._open_local(gz)
@@ -638,7 +662,9 @@ def test_formatting():
         check("purge removes everything", not any(fsd.OPEN_DIR.iterdir()), str(list(fsd.OPEN_DIR.iterdir())))
     finally:
         fsd.subprocess.Popen, fsd.os.startfile = real_popen, real_start
-        fsd.OPEN_DIR, fsd.NOTEPAD_HANDOFF_SECONDS = real_dir, real_handoff
+        fsd.OPEN_DIR, fsd.EDITOR_HANDOFF_SECONDS = real_dir, real_handoff
+        text_editor.EditorChooser.ask = real_chooser
+        AppSettings.update(text_editor="")
 
 
 def test_host_order():

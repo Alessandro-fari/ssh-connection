@@ -83,6 +83,17 @@ wildcard e direttive commentate restano intatti. Il file non viene mai rigenerat
 - `add_host(env, …)`: prima porta libera dopo i tunnel del jump host
   (`next_free_port`, salta le porte locali usate ovunque nel file), blocco Host in fondo
   alla sezione, tunnel dopo l'ultimo `LocalForward` del jump host.
+- **Porte inoltrate dell'host** (`LocalForward` nel *suo* blocco, oltre al tunnel):
+  `forwards(name)` → `PortForward` (porta locale, destinazione, porta remota,
+  descrizione = commenti subito sopra la riga, escluse le direttive commentate; `origin`
+  = indice di provenienza). `check_forwards(name, env, list, current)` normalizza e
+  restituisce gli avvisi: errore se la porta locale è un tunnel di un jump host, è doppia
+  nell'host o è inoltrata da un blocco wildcard che si applica all'host (`fnmatch` sui
+  pattern `Host`, con `!negazione`); avviso se la usa un altro host (le due sessioni non
+  si aprono insieme). Le porte già nel file e non toccate non vengono ricontrollate.
+  `set_forwards(name, list)` confronta per `origin`: le righe intatte restano, quelle
+  cambiate sono riscritte sul posto, quelle eliminate escono con il loro commento, le
+  nuove vanno in fondo al corpo del blocco.
 - `update_host` / `delete_host` / `set_jump_hostname`. Validazioni con `ConfigError`
   (messaggio in italiano): nome unico e senza spazi o jolly, porte 1-65535 e libere, una
   descrizione non può nominare l'altro ambiente (il parser la leggerebbe come intestazione
@@ -211,9 +222,11 @@ attivo: filtrare sceglie la corrispondenza migliore; frecce e clic cambiano host
 aggiorna i preferiti condivisi. Una ricerca riuscita aggiorna i Recenti. Ogni
 operazione di rete gira su un thread worker (`_run_async`) e i risultati tornano via
 `run_on_ui`; se l'host è cambiato nel frattempo vengono scartati. Una sola operazione
-alla volta. "Apri" funziona come WinSCP: copia in `OPEN_DIR/<host>/<id>/`, Blocco note,
-cancellazione alla chiusura del processo. Se il processo vive meno di 5 s il file è
-passato a una finestra già aperta: la copia resta a `purge_open_dir()`, chiamata
+alla volta. "Apri" funziona come WinSCP: copia in `OPEN_DIR/<host>/<id>/`, apertura con
+l'editor scelto (`gui/text_editor.py`; se l'utente annulla "Apri con" la copia viene tolta
+subito), cancellazione alla chiusura del processo. Se il processo vive meno di 5 s
+(`EDITOR_HANDOFF_SECONDS`) il file è passato a una finestra già aperta (Blocco note di
+Windows 11 a schede, Notepad++, VS Code): la copia resta a `purge_open_dir()`, chiamata
 all'uscita dalla tray e alla creazione del dialog. La cronologia delle cartelle è salvata
 per host in `file_search_paths`.
 
@@ -368,7 +381,7 @@ delle righe diversamente dal previsto (il dialog di fatto non funzionava).
 `SearchPopup.run_on_ui(fn)`, che mette `fn` sulla coda del thread Tk. Stile Windows 11:
 `Sidebar` a sinistra e pagine fatte di card (`setting_row`) a destra, con Salva / Annulla in
 basso. Pagine (costruite da `_page_<chiave>`): **Generale** (scorciatoia, avvio
-automatico, keepalive, timeout tunnel), **Aspetto** (tema scuro con anteprima immediata,
+automatico, editor dei file di testo, keepalive, timeout tunnel), **Aspetto** (tema scuro con anteprima immediata,
 annullata da Annulla; schema console PROD), **Host**, **Utente e password**,
 **Preferiti**, **Notifiche**, **Info**.
 - La scorciatoia si cattura da un campo (`binding_from_keys` usa il VK di
@@ -376,9 +389,14 @@ annullata da Annulla; schema console PROD), **Host**, **Utente e password**,
   globale è sospesa tramite il callback `hotkey_suspend`.
 - **Host**: a ogni apertura carica una copia di lavoro `SshConfigDocument` del config. In
   alto gli indirizzi dei jump host; sotto la tabella degli host (jump esclusi) con
-  Aggiungi / Modifica / Elimina. Aggiungi e Modifica aprono `HostForm`, un form modale che
-  chiama `add_host`/`update_host` sulla copia e mostra i `ConfigError` nel form. Rinominare
-  un host aggiorna anche i preferiti.
+  Aggiungi / Modifica / Elimina (e la colonna "Porte inoltrate"). Aggiungi e Modifica
+  aprono `HostForm`, un form modale che chiama `add_host`/`update_host` sulla copia e
+  mostra i `ConfigError` nel form. Rinominare un host aggiorna anche i preferiti. In
+  `HostForm` la sezione **Porte inoltrate** tiene una lista di lavoro di `PortForward`;
+  ogni porta si aggiunge o modifica in `ForwardForm`, un secondo modale che la valida
+  subito con `check_forwards` e chiede conferma sugli avvisi. All'Applica host e porte
+  (`set_forwards`) vanno nella copia insieme: se una delle due operazioni fallisce, le
+  righe tornano allo snapshot preso prima.
 - **Utente e password**: campi (password mascherata, con mostra/nascondi) letti con
   `ConfigLoader.read_maven_credentials_raw()`.
 - **Salva**: `collect()` valida le preferenze; gli indirizzi dei jump host vanno nella
@@ -388,6 +406,25 @@ annullata da Annulla; schema console PROD), **Host**, **Utente e password**,
   dialog resta aperto. **Annulla** non scrive nulla: la copia viene ricaricata alla
   prossima apertura.
 - I preferiti si modificano su una copia di lavoro (Aggiungi / Rimuovi / Su / Giù).
+- I pulsanti **Apri** (config, credenziali, preferenze, log) passano da
+  `text_editor.open_text`. Se lì si sceglie "Sempre", la combo di Generale si aggiorna.
+
+### `gui/text_editor.py` — con quale programma aprire i file di testo
+Un unico editor per tutti i file di testo dell'app: gli "Apri" delle Impostazioni e i file
+aperti da "Cerca file". È una scelta dell'app, non l'associazione di Windows: il config non
+ha estensione, i file remoti ne hanno di ogni tipo (`.log`, `.out`, `.1`, `.xml`…), e serve
+l'handle del processo per cancellare la copia temporanea.
+- Preferenza `text_editor` (percorso dell'.exe; `""` = "Chiedi ogni volta", il default).
+- `find_editors()`: Blocco note, i programmi che Windows associa a `.txt` e `.log`
+  (`AssocQueryStringW`, che rispetta la scelta dell'utente: qui Notepad++ e klogg),
+  Notepad++, VS Code, Sublime da App Paths o dai percorsi standard, senza doppioni e con
+  l'indicazione "(predefinito di Windows per …)".
+- `EditorChooser.ask()`: modale "Apri con" (thread Tk, `wait_window`) con l'elenco,
+  "Sfoglia..." per un altro .exe, **Annulla / Solo questa volta / Sempre**. "Sempre" salva
+  la preferenza; doppio clic e Invio valgono come "Solo questa volta".
+- `resolve_editor()` (editor salvato, se esiste ancora, oppure la scelta) e `launch()`
+  (`Popen [exe, file]`; se fallisce prova l'associazione di Windows e restituisce None).
+  `open_text()` le combina.
 
 ### `gui/token_dialog.py` — token 2FA di Init TEST / Init PROD
 Una `Toplevel` per ambiente sul root Tk del `SearchPopup`, costruita nascosta in
@@ -462,7 +499,8 @@ Va ri-applicato a ogni tick perché `update_menu()` ricrea l'handle del menu.
   parser XML prima della scrittura atomica. `read_maven_credentials_raw()` restituisce i
   valori grezzi (dominio incluso, segnaposto = vuoto) per il dialog.
 - `maven_settings_path()` / `ensure_maven_settings()`: "Apri file" (pagine Utente e password
-  e Info) apre il file in Blocco note e, se manca, lo crea da un modello. I segnaposto
+  e Info) apre il file con l'editor dei file di testo (non con il programma dei `.xml`,
+  spesso un browser) e, se manca, lo crea da un modello. I segnaposto
   `INSERISCI_*` non compilati equivalgono a credenziali assenti. `_find()` cerca con e senza
   namespace Maven (confronto `is not None`: un `Element` senza figli è falsy).
 

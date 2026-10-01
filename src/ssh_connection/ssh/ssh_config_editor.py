@@ -18,6 +18,14 @@ Model (the same the launcher relies on):
   creates both, on the first free local port after the jump host's ones.
 Hosts reached directly (a real HostName) can be edited too (HostName, Port).
 
+Besides its tunnel, a host can forward more ports with `LocalForward` lines
+in its own block (DB, HSM, JMX...): `forwards()` lists them with the comment
+right above each line as description, `set_forwards()` replaces the list,
+touching only the lines that changed. A local port can be shared with
+another host (the two sessions just cannot be open together: a warning,
+not an error), but not with a jump host tunnel nor with a block that also
+applies to this host (wildcards): ssh would fail to bind it.
+
 A host's description is the comment block right above its `Host` line.
 Deleting a host removes that comment, the block and the jump host tunnel.
 
@@ -26,9 +34,10 @@ refuses if the file changed on disk since it was loaded (edited by hand in
 the meantime), so nothing is overwritten silently.
 """
 
+import fnmatch
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -38,6 +47,11 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _DEST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")   # hostname / IPv4
 _DEFAULT_INDENT = "    "
 _FIRST_TUNNEL_PORT = {"TEST": 2222, "PROD": 3222}
+# A comment starting with one of these is a commented-out directive, not
+# the description of the LocalForward below it.
+_COMMENTED_DIRECTIVE_RE = re.compile(
+    r"^(localforward|remoteforward|dynamicforward|hostname|port|user|proxyjump|"
+    r"identityfile|host)\b", re.IGNORECASE)
 
 
 class ConfigError(Exception):
@@ -61,6 +75,17 @@ class HostEntry:
     @property
     def kind(self) -> str:
         return "jump" if self.is_jump else ("tunnel" if self.via_jump else "direct")
+
+
+@dataclass
+class PortForward:
+    """A LocalForward of a host's own block, as shown in the host form."""
+    local_port: int
+    dest: str = "localhost"
+    dest_port: Optional[int] = None   # None = same as local_port
+    description: str = ""
+    bind: str = ""                    # "" or "addr:" in front of the local port
+    origin: Optional[int] = None      # index in forwards() it comes from; None = new
 
 
 @dataclass
@@ -258,6 +283,30 @@ class SshConfigDocument:
 
     def _description(self, b: _Block) -> str:
         return " · ".join(_comment_text(self.lines[i]) for i in range(b.lead, b.host))
+
+    def _forward_comment(self, b: _Block, line: int) -> int:
+        """First line of the comment block describing the LocalForward at
+        `line` (== line if none): comments right above it, inside the block."""
+        top = line
+        while top - 1 > b.host and _is_comment(self.lines[top - 1]) \
+                and not _COMMENTED_DIRECTIVE_RE.match(_comment_text(self.lines[top - 1])):
+            top -= 1
+        return top
+
+    def _blocks_applying_to(self, name: str) -> List[_Block]:
+        """Wildcard / multi-name blocks (not `name`'s own) whose Host
+        patterns match `name`: their LocalForwards open with its session."""
+        low = name.lower()
+        out = []
+        for b in self._blocks():
+            if not b.names or any(n.lower() == low for n in b.names):
+                continue
+            pos = [n.lower() for n in b.names if not n.startswith("!")]
+            neg = [n[1:].lower() for n in b.names if n.startswith("!")]
+            if any(fnmatch.fnmatchcase(low, p) for p in pos) and \
+                    not any(fnmatch.fnmatchcase(low, p) for p in neg):
+                out.append(b)
+        return out
 
     def jump_host(self, env: str) -> Optional[str]:
         names = sorted((b.names[0] for b in self._blocks()
@@ -531,6 +580,134 @@ class SshConfigDocument:
         if j is None:
             raise ConfigError(f"Nella sezione {env} non c'è un jump host (login_...).")
         self.update_host(j, hostname=hostname)
+
+    # ------------------------------------------------------------------
+    # Port forwards of a host (LocalForward lines in its own block)
+
+    def forwards(self, name: str) -> List[PortForward]:
+        b = self._block_of(name)
+        if b is None:
+            return []
+        out = []
+        for n, f in enumerate(self._forwards(b)):
+            top = self._forward_comment(b, f.line)
+            desc = " · ".join(_comment_text(self.lines[i]) for i in range(top, f.line))
+            out.append(PortForward(f.local_port, f.dest, f.dest_port, desc, f.bind, origin=n))
+        return out
+
+    def check_forwards(self, name: str, env: str, forwards: List[PortForward],
+                       current: Optional[str] = None) -> Tuple[List[PortForward], List[str]]:
+        """Validate the forwards host `name` would have (`current`: the
+        existing host they belong to, None for a new one). Returns
+        (normalized forwards, warnings); raises ConfigError for what would
+        not work. Ports already in the file and left unchanged are not
+        checked again: the file is the user's."""
+        cur_block = self._block_of(current) if current else None
+        old = self._forwards(cur_block) if cur_block else []
+        old_desc = [f.description for f in self.forwards(current)] if cur_block else []
+        # the editor's text is compared verbatim: an untouched description
+        # is neither re-validated nor rewritten
+        out: List[PortForward] = []
+        seen: Set[int] = set()
+        for f in forwards:
+            local = self._check_port(f.local_port, "Porta locale")
+            dest = (f.dest or "").strip() or "localhost"
+            self._check_dest(dest)
+            dport = self._check_port(f.dest_port if f.dest_port not in (None, "") else local,
+                                     "Porta remota")
+            desc = f.description or ""
+            if f.origin is None or f.origin >= len(old_desc) or desc != old_desc[f.origin]:
+                desc = self._check_description(desc, env)
+            if local in seen:
+                raise ConfigError(f"La porta locale {local} è inoltrata due volte da questo host.")
+            seen.add(local)
+            out.append(replace(f, local_port=local, dest=dest, dest_port=dport, description=desc))
+
+        jumps = {j for j in (self.jump_host(e) for e in ENVS) if j}
+        jump_ports: Dict[int, str] = {}
+        for j in sorted(jumps):
+            for f in self._forwards(self._block_of(j)):
+                jump_ports.setdefault(f.local_port, f"del tunnel di {j} verso {f.dest}:{f.dest_port}")
+        applying = self._blocks_applying_to(name)
+        applying_ports: Dict[int, str] = {}
+        for b in applying:
+            for f in self._forwards(b):
+                applying_ports.setdefault(f.local_port, " ".join(b.names))
+        skip = {b.host for b in applying} | ({cur_block.host} if cur_block else set())
+        others: Dict[int, List[str]] = {}
+        for b in self._blocks():
+            if b.host in skip or not b.names or b.names[0] in jumps or any(
+                    "*" in n or "?" in n or n.startswith("!") for n in b.names):
+                continue
+            for f in self._forwards(b):
+                others.setdefault(f.local_port, []).append(" ".join(b.names))
+
+        warnings = []
+        for f in out:
+            if f.origin is not None and f.origin < len(old) \
+                    and old[f.origin].local_port == f.local_port:
+                continue                       # already in the file, untouched
+            p = f.local_port
+            if p in jump_ports:
+                raise ConfigError(f"La porta locale {p} è già usata: è la porta {jump_ports[p]}, "
+                                  f"sempre aperta insieme al jump host.")
+            if p in applying_ports:
+                raise ConfigError(f"La porta locale {p} è già inoltrata a questo host dal "
+                                  f"blocco \"Host {applying_ports[p]}\".")
+            if p in others:
+                warnings.append(f"La porta locale {p} è inoltrata anche da "
+                                f"{', '.join(others[p])}: le due sessioni non potranno essere "
+                                f"aperte insieme.")
+        return out, warnings
+
+    def set_forwards(self, name: str, forwards: List[PortForward]) -> None:
+        """Make `forwards` the LocalForwards of `name`'s block. Entries keep
+        `origin` from forwards(): unchanged ones are left as they are,
+        edited ones rewritten in place, missing ones removed with their
+        comment, new ones appended at the end of the block."""
+        entry = self.host(name)
+        if entry is None:
+            raise ConfigError(f"Host {name} non trovato nel config.")
+        if entry.is_jump:
+            raise ConfigError("Le porte del jump host sono i tunnel degli host: si gestiscono "
+                              "dai singoli host.")
+        self._check_editable(entry)
+        forwards, _ = self.check_forwards(name, entry.env, forwards, current=name)
+        b = self._block_of(name)
+        old = self._forwards(b)
+        before = list(self.lines)
+        kept = {f.origin: f for f in forwards if f.origin is not None and f.origin < len(old)}
+
+        # 1) new ones at the end of the block body (below every old line)
+        tpl = old[-1] if old else None
+        ind = _indent(self.lines[tpl.line]) if tpl else self._body_indent(b)
+        at = max([i for i, _, _ in self._body(b)] + [b.host]) + 1
+        new_lines = []
+        for f in forwards:
+            if f.origin is None or f.origin >= len(old):
+                if f.description:
+                    new_lines.append(f"{ind}# {f.description}")
+                new_lines.append(self._forward_line(b, tpl, f.bind, f.local_port,
+                                                    f.dest, f.dest_port))
+        self.lines[at:at] = new_lines
+        # 2) the old ones bottom-up, so the indices above stay valid
+        for n in range(len(old) - 1, -1, -1):
+            o = old[n]
+            top = self._forward_comment(b, o.line)
+            desc = " · ".join(_comment_text(self.lines[i]) for i in range(top, o.line))
+            f = kept.get(n)
+            if f is None:
+                del self.lines[top:o.line + 1]
+                continue
+            if (f.local_port, f.dest, f.dest_port, f.bind) != \
+                    (o.local_port, o.dest, o.dest_port, o.bind):
+                self.lines[o.line] = self._forward_line(b, o, f.bind, f.local_port,
+                                                        f.dest, f.dest_port)
+            if f.description != desc:
+                cind = _indent(self.lines[top]) if top < o.line else _indent(self.lines[o.line])
+                self.lines[top:o.line] = [f"{cind}# {f.description}"] if f.description else []
+        if self.lines != before:
+            self.dirty = True
 
     def host_names(self) -> Set[str]:
         return {h.name for h in self.hosts()}

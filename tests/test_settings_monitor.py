@@ -487,9 +487,12 @@ def test_credentials_file():
         check("settings.xml without namespace is read (old falsy-Element bug)",
               c is not None and (c.username, c.password) == ("u", "p"))
 
-        # Dialog button: creates the file if needed and opens it in Notepad.
+        # Dialog button: creates the file if needed and opens it in the
+        # text editor (here the one saved with "Sempre").
         import subprocess
+        from ssh_connection.gui import text_editor
         from ssh_connection.gui.settings_dialog import SettingsDialog
+        AppSettings.update(text_editor=text_editor.notepad_path())
         opened = []
         real_popen = subprocess.Popen
         subprocess.Popen = lambda args, **kw: opened.append(args)
@@ -504,7 +507,9 @@ def test_credentials_file():
         finally:
             subprocess.Popen = real_popen
         check("button creates the missing file", creds.exists())
-        check("button opens it in Notepad", opened == [["notepad.exe", str(creds)]], str(opened))
+        check("button opens it in the text editor",
+              opened == [[text_editor.notepad_path(), str(creds)]], str(opened))
+        AppSettings.update(text_editor="")
         check("button explains what to fill in", "INSERISCI_UTENTE" in dlg._var_info.v, dlg._var_info.v)
     finally:
         ConfigLoader.maven_settings_path = real_path

@@ -1,7 +1,7 @@
 """
 "Cerca file" window: browse the folders of a host like WinSCP, filter or
 search files (by name and optionally content), open them (downloaded and
-shown in Notepad) or download them.
+shown in the text editor) or download them.
 
 Same Tk interpreter and thread as the search popup and the settings dialog
 (a Toplevel driven through `SearchPopup.run_on_ui()`). Network work never
@@ -30,10 +30,12 @@ jump host login. Otherwise an explicit action (Enter, ⟳, a path) connects,
 opening the login like a terminal connection would.
 
 "Apri" works like WinSCP's "open": the file is downloaded to a private
-temporary folder (OPEN_DIR/<host>/<unique>/name), shown in Notepad, and the
-local copy is deleted when Notepad is closed. It is a read-only copy: edits
-are never uploaded back. When the Notepad process hands the file to an
-already open window and exits at once (Windows 11 tabs), or the file is
+temporary folder (OPEN_DIR/<host>/<unique>/name), shown in the text editor
+chosen by the user (gui.text_editor: "Apri con" with Solo questa volta /
+Sempre, Blocco note, Notepad++, VS Code...), and the local copy is deleted
+when the editor is closed. It is a read-only copy: edits are never uploaded
+back. When the editor process hands the file to an already open window and
+exits at once (Windows 11 Notepad tabs, Notepad++, VS Code), or the file is
 opened with another program, the copy is removed later by
 `purge_open_dir()` (at application exit and at the next start).
 
@@ -55,19 +57,19 @@ from typing import Callable, List, Optional, Sequence, Tuple
 from ..config.app_settings import AppSettings
 from ..ssh.remote_files import (MAX_RESULTS, RemoteError, RemoteFile, RemoteSession, glob_for,
                                 is_supported_host, parent_path, route_ready)
-from . import theme, widgets
+from . import text_editor, theme, widgets
 from .search_dialog import (_ENVS, _force_foreground, build_host_rows, fill_host_listbox,
                             next_host_row)
 from .theme import px
 
 # Files opened with "Apri" are downloaded here first.
 OPEN_DIR = Path(tempfile.gettempdir()) / "SSH-Connection-Manager"
-# A Notepad process living less than this handed the file to another
+# An editor process living less than this handed the file to another
 # window: the copy may still be loading, so it is left for purge_open_dir.
-NOTEPAD_HANDOFF_SECONDS = 5.0
+EDITOR_HANDOFF_SECONDS = 5.0
 # Ask before downloading bigger files with "Apri".
 BIG_FILE = 50 * 1024 * 1024
-# Opened with their associated program instead of Notepad (binary content).
+# Opened with their associated program instead of the text editor (binary content).
 BINARY_EXTENSIONS = {".gz", ".tgz", ".zip", ".tar", ".bz2", ".xz", ".7z", ".jar",
                      ".war", ".ear", ".pdf", ".png", ".jpg", ".jpeg", ".gif",
                      ".xlsx", ".xls", ".docx", ".doc"}
@@ -132,8 +134,8 @@ def downloads_dir() -> Path:
 class FileSearchDialog:
     def __init__(self, ui_host,
                  host_provider: Callable[[], Sequence[Tuple[str, List[str]]]]):
-        # Leftovers of a previous run (copies handed to another Notepad
-        # window, or the app closed while Notepad was open).
+        # Leftovers of a previous run (copies handed to another editor
+        # window, or the app closed while the editor was open).
         threading.Thread(target=purge_open_dir, args=(3600,), daemon=True).start()
         self._ui = ui_host
         self._host_provider = host_provider
@@ -696,7 +698,7 @@ class FileSearchDialog:
                 self._render(select_name)
                 n_dirs = sum(1 for e in entries if e.is_dir)
                 self._status(f"{path}  -  {n_dirs} cartelle, {len(entries) - n_dirs} file  -  "
-                             f"doppio clic: entra / apri in Blocco note  -  Backspace: su  -  "
+                             f"doppio clic: entra / apri  -  Backspace: su  -  "
                              f"Ctrl+C: copia percorso")
             return done
 
@@ -773,7 +775,7 @@ class FileSearchDialog:
                 self._render()
                 more = f" (mostrati i primi {MAX_RESULTS}: restringi il filtro)" if truncated else ""
                 self._status(f"{len(files)} file trovati in {root} su {host} in {elapsed:.1f} s"
-                             f"{more}  -  doppio clic: apri in Blocco note  -  "
+                             f"{more}  -  doppio clic: apri  -  "
                              f"\"Vai alla cartella\" per sfogliare quella del file")
             return done
 
@@ -840,35 +842,46 @@ class FileSearchDialog:
 
             def done():
                 if open_after:
-                    self._status(f"Aperto {f.path} (copia temporanea, eliminata alla "
-                                 f"chiusura di Blocco note)")
-                    self._open_local(local)
+                    if self._open_local(local, self._top):
+                        self._status(f"Aperto {f.path} (copia temporanea, eliminata alla "
+                                     f"chiusura dell'editor)")
+                    else:
+                        self._status(f"{f.name} non aperto: nessun programma scelto")
                 else:
                     self._status(f"Salvato in {local}")
             return done
         self._run_async(work)
 
     @staticmethod
-    def _open_local(path: Path) -> None:
-        """Text (logs, .out, .log.1, configs...) in Notepad, deleting the
-        temporary copy once Notepad is closed; archives and documents with
-        their associated program (cleaned up by purge_open_dir)."""
+    def _open_local(path: Path, parent=None) -> bool:
+        """Text (logs, .out, .log.1, configs...) in the chosen text editor
+        (asked first if none is saved), deleting the temporary copy once it
+        is closed; archives and documents with their associated program
+        (cleaned up by purge_open_dir). False if the user cancelled the
+        choice of the editor (the copy is removed at once)."""
         if path.suffix.lower() in BINARY_EXTENSIONS:
             try:
                 os.startfile(str(path))
-                return
+                return True
             except OSError:
                 pass
-        proc = subprocess.Popen(["notepad.exe", str(path)])
+        exe = text_editor.resolve_editor(parent, path.name)
+        if exe is None:
+            _remove_copy(path)              # "Apri con" cancelled
+            return False
+        proc = text_editor.launch(exe, path)
+        if proc is None:                    # fell back to the association
+            return True
         started = time.monotonic()
 
         def cleanup_when_closed():
             proc.wait()
-            if time.monotonic() - started >= NOTEPAD_HANDOFF_SECONDS:
+            if time.monotonic() - started >= EDITOR_HANDOFF_SECONDS:
                 _remove_copy(path)
 
         threading.Thread(target=cleanup_when_closed, daemon=True,
                          name="OpenCleanup").start()
+        return True
 
     def _copy_path(self) -> str:
         sel = self._tree.selection()

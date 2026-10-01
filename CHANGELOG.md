@@ -109,6 +109,18 @@ annotati nella voce stessa. Formato ispirato a [Keep a Changelog](https://keepac
     nella versione pulita.
 
 ### Corretto
+- **2026-10-01** — **Le Impostazioni non restano più sempre in primo piano.** La finestra
+  era aperta con `-topmost` e tutte le altre applicazioni finivano sotto di lei; lo stesso
+  valeva per i form modali *Host* e *Porta*. Ora si porta davanti una volta sola
+  all'apertura (`_force_foreground`, come "Cerca file"), poi si comporta come una finestra
+  normale: le app aperte dopo le vanno sopra e si ritrova dalla barra delle applicazioni,
+  da Alt+Tab o riaprendola dalla tray. I due form, `transient`, restano sopra le
+  Impostazioni ma non sopra le altre app.
+  - *Verifica*: stili Win32 della finestra (niente `WS_EX_TOPMOST`, nessun owner, niente
+    tool window, quindi pulsante sulla taskbar) e z-order con Blocco note aperto dopo:
+    Blocco note, poi il form Host, poi le Impostazioni.
+  - Restano `-topmost` il popup di ricerca e la finestra del token di Init, che sono
+    finestre "volanti" aperte da hotkey o tray e chiuse subito dopo l'uso.
 - **2026-09-30** — **"Cerca file" non trovava nulla nelle cartelle applicative**:
   0 risultati in 0,1 s su `/app/nets/batchcommon` di `stlit1te01`, dove i file c'erano.
   *Causa*: la cartella è una catena di link simbolici. `batchcommon` punta a
@@ -137,6 +149,58 @@ annotati nella voce stessa. Formato ispirato a [Keep a Changelog](https://keepac
   - Anche il menu tray e le sue icone di stato (`SM_CXMENUCHECK`) sono ora nitidi.
 
 ### Aggiunto
+- **2026-10-01** — **Scelta dell'editor per i file di testo, "Apri con" con Solo questa
+  volta / Sempre.** Prima "Apri" del config usava `os.startfile`: il config non ha
+  estensione, quindi Windows chiedeva il programma ogni volta, senza poterlo ricordare. I
+  file di "Cerca file" e le credenziali andavano sempre in Blocco note, senza scelta.
+  - Nuovo `gui/text_editor.py`. Finché non c'è un editor salvato, una finestra "Apri con"
+    elenca gli editor trovati sul PC e permette di sceglierne un altro con
+    **Sfoglia...**; poi **Solo questa volta** o **Sempre**. Su questo PC trova Blocco note,
+    Notepad++ (predefinito per .txt), klogg (predefinito per .log) e VS Code.
+  - Vale per tutti gli "Apri" delle Impostazioni (config SSH, utente e password,
+    preferenze, log) e per il doppio clic / Invio su un file in "Cerca file". Gli archivi
+    e i documenti (`.gz`, `.zip`, `.pdf`, `.xlsx`…) continuano ad aprirsi con il loro
+    programma.
+  - *Impostazioni → Generale → Editor dei file di testo*: combo con "Chiedi ogni volta"
+    (il default) e gli editor trovati, più Sfoglia...; nuova preferenza `text_editor`.
+  - "Cerca file": annullare "Apri con" non apre nulla e cancella subito la copia
+    temporanea. La pulizia alla chiusura dell'editor resta (`NOTEPAD_HANDOFF_SECONDS` →
+    `EDITOR_HANDOFF_SECONDS`): un editor che passa il file a una finestra già aperta ed
+    esce subito (Notepad++, VS Code, Blocco note a schede) lascia la copia a
+    `purge_open_dir()`.
+  - *Scelta*: una preferenza dell'app invece dell'associazione di Windows. Il config non
+    ha estensione e i file remoti ne hanno di ogni tipo (`.log`, `.out`, `.1`…), quindi un
+    solo editor per tutti è più prevedibile, e l'app ha bisogno dell'handle del processo
+    per cancellare la copia.
+  - Build: aggiunto l'hidden import `ssh_connection.gui.text_editor` (build_release,
+    build_debug, spec).
+- **2026-10-01** — **Più porte inoltrate per host dalla GUI** (*Impostazioni → Host →
+  Modifica*, sezione **Porte inoltrate**). Prima la GUI gestiva solo il tunnel SSH
+  sul jump host: le altre righe `LocalForward` nel blocco dell'host (DB, HSM, mbean JMX…)
+  si potevano aggiungere solo a mano nel config. Così la GUI non copriva tutto quello che
+  si fa nel file.
+  - Tabella con porta locale, destinazione e descrizione (il commento subito sopra la
+    riga, es. `# mbean di GWEPS`), con **Aggiungi porta… / Modifica… / Elimina**. Il form
+    della porta chiede porta locale, destinazione (vuoto = `localhost`, cioè l'host
+    stesso), porta remota (vuoto = uguale alla locale) e descrizione. Disponibile anche
+    per un host nuovo e per gli host diretti. La tabella degli host ha la nuova colonna
+    "Porte inoltrate".
+  - `SshConfigDocument.forwards()` / `check_forwards()` / `set_forwards()`. Le righe non
+    toccate restano identiche; quelle modificate sono riscritte sul posto; quelle
+    eliminate spariscono con il loro commento; le nuove vanno in fondo al blocco con
+    l'indentazione delle righe vicine. I commenti che sono direttive commentate
+    (`#LocalForward …`) non sono presi come descrizione.
+  - *Conflitti*. Errore se la porta locale è già quella di un tunnel di un jump host
+    (sempre aperta con lui), se è doppia nello stesso host o se è già inoltrata da un
+    blocco wildcard che vale anche per quell'host (es. `Host *it1te*` → 1523): ssh non
+    riuscirebbe ad aprirla. **Solo un avviso** (con conferma) se un *altro* host usa la
+    stessa porta locale. Il config reale lo fa apposta (3050, 9978, 25000… su più host):
+    vuol dire solo che le due sessioni non si aprono insieme.
+  - Le porte già presenti nel file e non modificate non vengono ricontrollate, così un
+    conflitto preesistente non blocca le altre modifiche. Modifica dell'host e porte si
+    applicano insieme: se una delle due fallisce, la copia di lavoro torna com'era.
+  - Come per ogni modifica al config: valgono dalla prossima apertura della sessione
+    dell'host, senza riavviare l'app.
 - **2026-09-30** — **Host, jump host e credenziali modificabili dalle Impostazioni**, senza
   aprire i file a mano (richiesta d'uso: ogni nuovo server voleva due modifiche coordinate
   nel config, tunnel sul jump host e voce Host, fatte in Blocco note).

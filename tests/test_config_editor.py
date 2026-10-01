@@ -4,6 +4,8 @@ Tests for editing the configuration from the settings dialog:
 - SshConfigDocument (~/.ssh/config): hosts model, add / edit / delete a
   host behind the jump host, jump host address, validation, untouched
   lines, CRLF / tabs / BOM kept, backup and "changed on disk" refusal;
+- the extra forwarded ports of a host (LocalForward in its own block):
+  list, add / edit / remove, conflicts (error) and shared ports (warning);
 - ConfigLoader.save_maven_credentials (settings.xml): only the text of the
   first <server>'s username / password changes;
 - the settings dialog: host edits and credentials are written on Salva
@@ -22,6 +24,7 @@ import sys
 import tempfile
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 project_root = Path(__file__).parent.parent
@@ -29,7 +32,7 @@ sys.path.insert(0, str(project_root / "src"))
 
 from ssh_connection.config.app_settings import AppSettings
 from ssh_connection.config.config_loader import _MAVEN_TEMPLATE, ConfigLoader
-from ssh_connection.ssh.ssh_config_editor import ConfigError, SshConfigDocument
+from ssh_connection.ssh.ssh_config_editor import ConfigError, PortForward, SshConfigDocument
 from ssh_connection.ssh.ssh_config_parser import SshConfigParser
 
 TMP = Path(tempfile.mkdtemp(prefix="sshcm-edit-"))
@@ -227,6 +230,67 @@ def test_add_edit_delete():
         print("  (skipped ssh -G checks: Windows OpenSSH not found)")
 
 
+def test_forwards():
+    print("\n[2b] Forwarded ports of a host")
+    doc = SshConfigDocument(SAMPLE)
+    fw = doc.forwards("stlit1tf01")
+    check("forwards listed with the comment above as description",
+          [(f.local_port, f.dest, f.dest_port, f.description) for f in fw]
+          == [(3050, "localhost", 3050, ""), (9868, "hsmgwloc", 9868, "HSM")], str(fw))
+    check("no forwards for a host without LocalForward", doc.forwards("gwit1te01") == [])
+    doc.set_forwards("stlit1tf01", fw)
+    check("same list: nothing changes", doc.text() == SAMPLE and not doc.dirty)
+
+    def err(name, forwards, needle, current=None):
+        return raises(lambda: doc.check_forwards(name, "TEST", forwards, current=current), needle)
+    check("jump host tunnel port refused", err("gwit1te01", [PortForward(2222)], "login_test"))
+    check("port of a wildcard block applying to the host refused",
+          err("stlit1tf01", fw + [PortForward(1524)], "*it1tf*", "stlit1tf01"))
+    check("same port twice in the host refused",
+          err("gwit1te01", [PortForward(4000), PortForward(4000)], "due volte"))
+    check("bad destination refused", err("gwit1te01", [PortForward(4000, "a b")], "destinazione"))
+    check("port out of range refused", err("gwit1te01", [PortForward(70000)], "65535"))
+    check("description naming the other environment refused",
+          err("gwit1te01", [PortForward(4000, description="db prod")], "PROD"))
+    _, warn = doc.check_forwards("gwit1te01", "TEST", [PortForward(3050)], current="gwit1te01")
+    check("port shared with another host: only a warning",
+          len(warn) == 1 and "stlit1tf01" in warn[0], str(warn))
+    check("wildcard block of another host is not a conflict",
+          doc.check_forwards("gwit1te01", "TEST", [PortForward(1524)], current="gwit1te01")
+          == ([PortForward(1524, "localhost", 1524)], []))
+
+    doc.set_forwards("stlit1tf01", [replace(fw[0], dest_port=3051),
+                                    PortForward(3152, description="mbean di GWEPS")])
+    lines = doc.lines
+    i = lines.index("Host stlit1tf01")
+    check("edit in place, removed one goes with its comment, new one appended with comment",
+          lines[i + 3:i + 6] == ["\tLocalForward 3050 localhost:3051", "\t# mbean di GWEPS",
+                                 "\tLocalForward 3152 localhost:3152"]
+          and "\t# HSM" not in lines and lines[i + 6] == "", "\n".join(lines[i:i + 8]))
+    check("rest of the file untouched",
+          is_subsequence([l for l in SAMPLE.splitlines()
+                          if l not in ("\tLocalForward 3050 localhost:3050", "\t# HSM",
+                                       "\tLocalForward 9868 hsmgwloc:9868")], lines))
+    doc.set_forwards("gwit1te01", [PortForward(5000, "db9", 1521, "DB 9")])
+    lines = doc.lines
+    i = lines.index("Host gwit1te01")
+    check("first forward of a host: indentation of its lines, after its directives",
+          lines[i + 3:i + 6] == ["    # DB 9", "    LocalForward 5000 db9:1521",
+                                 "\t# note at the end of the block"], "\n".join(lines[i:i + 7]))
+    doc.set_forwards("gwit1te01", [replace(doc.forwards("gwit1te01")[0], description="DB nove")])
+    check("description changed in place", "    # DB nove" in doc.lines and "    # DB 9" not in doc.lines)
+    doc.set_forwards("gwit1te01", [])
+    check("removing all forwards", doc.forwards("gwit1te01") == [] and
+          not any("5000" in l or "DB nove" in l for l in doc.lines))
+    check("jump host forwards not editable here",
+          raises(lambda: doc.set_forwards("login_test", []), "jump"))
+    if WIN_SSH.exists():
+        g = ssh_g(_write(doc, "forwards"), "stlit1tf01")
+        check("ssh -G: the host opens its forwards",
+              {"3050 [localhost]:3051", "3152 [localhost]:3152"} <= set(g.get("localforward", [])),
+              str(g.get("localforward")))
+
+
 def _write(doc, name) -> Path:
     path = TMP / name
     path.write_bytes(doc.text().encode("utf-8"))
@@ -357,6 +421,8 @@ def test_dialog_save_and_cancel():
               (TMP / "dlg_config.bak").read_text(encoding="utf-8") == SAMPLE)
         check("Salva writes the credentials", ConfigLoader.read_maven_credentials_raw(creds) == ("DOM\\u2", "p2"))
         check("preferences still go through on_save", saved.get("dark_theme") is False, str(saved))
+        check("text editor: Chiedi ogni volta by default", saved.get("text_editor") == "",
+              str(saved.get("text_editor")))
         check("dialog closed after save", out["visible"] == 0)
 
         dlg.show()
@@ -371,6 +437,57 @@ def test_dialog_save_and_cancel():
         on_ui(empty_password)
         check("empty password refused, dialog stays open",
               "password" in out["error"].lower() and out["visible"] == 1, out["error"])
+
+        dlg.show()
+        time.sleep(0.5)
+
+        def edit_ports():
+            from ssh_connection.gui.settings_dialog import ForwardForm, HostForm
+            dlg._var_password.set("p2")
+            form = HostForm(dlg, dlg._doc.host("stlit1tf01"))
+            form.open()
+            out["listed"] = [form._fwd_tree.item(i, "text") for i in form._fwd_tree.get_children()]
+            ff = ForwardForm(form, None)
+            ff.open()
+            ff._vars["local_port"].set("2222")
+            ff._ok()
+            out["conflict"] = ff._var_error.get()
+            ff._vars["local_port"].set("3152")
+            ff._vars["description"].set("mbean di GWEPS")
+            ff._ok()
+            out["after_add"] = len(form._forwards)
+            form._fwd_tree.selection_set("1")
+            form._delete_forward()
+            form._ok()
+            out["table"] = dlg._host_tree.set("stlit1tf01", "fwd")
+            dlg._save()
+            out["error"] = dlg._var_error.get()
+        on_ui(edit_ports)
+
+        dlg.show()
+        time.sleep(0.5)
+
+        def pick_editor():
+            from ssh_connection.gui import text_editor
+            out["editor_values"] = list(dlg._editor_combo["values"])
+            dlg._var_editor.set("Blocco note")
+            dlg._save()
+            out["notepad"] = text_editor.notepad_path()
+        on_ui(pick_editor)
+        check("editor combo: ask first, then the editors found",
+              out["editor_values"][:2] == ["Chiedi ogni volta", "Blocco note"],
+              str(out["editor_values"]))
+        check("Salva stores the chosen editor", saved.get("text_editor") == out["notepad"],
+              str(saved.get("text_editor")))
+        check("host form lists the forwarded ports", out["listed"] == ["3050", "9868"], str(out["listed"]))
+        check("port form refuses a jump host tunnel port", "login_test" in out["conflict"],
+              out["conflict"])
+        check("port added in the form", out["after_add"] == 3)
+        check("hosts table shows the forwarded ports", out["table"] == "3050, 3152", out["table"])
+        text = cfg.read_text(encoding="utf-8")
+        check("Salva writes the ports of the host",
+              "\t# mbean di GWEPS\n\tLocalForward 3152 localhost:3152" in text
+              and "9868" not in text and "\t# HSM\n" not in text, out["error"])
     finally:
         ConfigLoader.maven_settings_path = real_path
         popup.stop()
@@ -381,6 +498,7 @@ def main():
     try:
         test_model()
         test_add_edit_delete()
+        test_forwards()
         test_file_format_and_save()
         test_credentials()
         test_dialog_save_and_cancel()
