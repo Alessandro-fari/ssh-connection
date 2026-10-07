@@ -229,19 +229,54 @@ class SessionMonitor:
         cached = self._forward_cache.get(host)
         if cached and cached[0] == mtime:
             return cached[1]
-        ports: List[int] = []
+        ports = self.resolve_forward_ports(host)
+        self._forward_cache[host] = (mtime, ports)
+        return ports
+
+    @classmethod
+    def resolve_forward_ports(cls, host: str) -> List[int]:
+        """Uncached: local ports of the LocalForwards `ssh -G host` resolves now."""
         try:
             from .ssh_launcher import SshLauncher
             out = subprocess.run(
                 [SshLauncher._ssh_executable(), "-G", host],
                 stdin=subprocess.DEVNULL, capture_output=True, text=True,
                 timeout=10, creationflags=subprocess.CREATE_NO_WINDOW).stdout
-            ports = sorted({p for p in (self.parse_forward_port(l) for l in out.splitlines())
-                            if p is not None})
+            return sorted({p for p in (cls.parse_forward_port(l) for l in out.splitlines())
+                           if p is not None})
         except Exception as e:
             logging.debug(f"ssh -G {host} failed: {e}")
-        self._forward_cache[host] = (mtime, ports)
-        return ports
+            return []
+
+    @classmethod
+    def resolve_forward_specs(cls, host: str) -> Dict[int, str]:
+        """Uncached: {local port: 'port:desthost:destport'} of `ssh -G host`,
+        the form ssh's `-L` takes."""
+        try:
+            from .ssh_launcher import SshLauncher
+            out = subprocess.run(
+                [SshLauncher._ssh_executable(), "-G", host],
+                stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                timeout=10, creationflags=subprocess.CREATE_NO_WINDOW).stdout
+        except Exception as e:
+            logging.debug(f"ssh -G {host} failed: {e}")
+            return {}
+        specs: Dict[int, str] = {}
+        for line in out.splitlines():
+            port = cls.parse_forward_port(line)
+            if port is not None:
+                dest = line.split()[2].replace("[", "").replace("]", "")
+                specs[port] = f"{port}:{dest}"
+        return specs
+
+    @classmethod
+    def missing_forward_ports(cls, host: str) -> List[int]:
+        """Ports `host` should forward according to the config as it is now but
+        that no ssh is listening on: the live session predates a config edit."""
+        listening = cls._listening_ssh_ports()
+        if listening is None:
+            return []
+        return [p for p in cls.resolve_forward_ports(host) if p not in listening]
 
     @staticmethod
     def parse_forward_port(line: str) -> Optional[int]:

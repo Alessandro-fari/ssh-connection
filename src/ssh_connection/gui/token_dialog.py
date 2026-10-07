@@ -90,7 +90,7 @@ class TokenDialog:
         var = tk.StringVar()
         row = theme.style(tk.Frame(body), "window")
         row.pack(fill="x")
-        entry = theme.style(tk.Entry(row, textvariable=var, font=theme.font(16), show="•",
+        entry = theme.style(tk.Entry(row, textvariable=var, font=theme.font(16),
                                      justify="center", width=16), "entry")
         entry.pack(side="left", fill="x", expand=True, ipady=px(6))
         eye = w.IconButton(row, "eye", lambda: entry.configure(
@@ -121,7 +121,7 @@ class TokenDialog:
             self._finish(env, None)
         win["box"], win["done"] = box, done
         win["var"].set("")
-        win["entry"].configure(show="•")
+        win["entry"].configure(show="")       # visible by default
         win["hint"].set("Genera un token nuovo: ogni token vale per un solo login.")
         theme.set_role(win["hint_label"], "hint")
         top = win["top"]

@@ -102,7 +102,26 @@ class InitOrchestrator:
             #    password prompt then the TOKEN prompt). session_alive (not
             #    is_active): a console whose ssh already died must not be
             #    "reused" — that is what made a failed Init unrecoverable.
-            if tracker.session_alive(login):
+            reuse = tracker.session_alive(login)
+            if reuse:
+                # A live login only has the forwards it read at start-up: ports
+                # added to ~/.ssh/config since then need a fresh login, which
+                # is why the token was just asked.
+                from .session_monitor import SessionMonitor
+                missing = SessionMonitor.missing_forward_ports(login)
+                if missing:
+                    logging.info(f"Init {env}: {login} lacks forwards {missing}, "
+                                 f"reopening it and its targets")
+                    reuse = False
+                    # Kill even a visible login: its ssh would keep the old
+                    # ports bound and the new one could not take them over.
+                    old_pid = tracker.get_pid(login)
+                    if old_pid:
+                        SshLauncher.discard(login, old_pid)
+                    for host, tpid, _ in list(cls._live_procs()):
+                        if host in targets:
+                            kill_console(tpid)
+            if reuse:
                 logging.info(f"Init {env}: {login} already active, reusing it")
                 opened.append(login)
             else:

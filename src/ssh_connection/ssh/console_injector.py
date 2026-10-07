@@ -271,6 +271,36 @@ class ConsoleInjector:
         return False
 
     @classmethod
+    def add_local_forward(cls, pid: int, spec: str) -> bool:
+        """Add a LocalForward to the live ssh session of console `pid` through
+        ssh's escape command line: Enter (the escape char only counts at the
+        start of a line), `~C`, then `-L spec` + Enter. `spec` is
+        'port:host:hostport'. Needs `-o EnableEscapeCommandline=yes` on that
+        ssh. Returns whether the keys were typed, not whether ssh accepted."""
+        with _console_lock:
+            original_pid = cls._sibling_console_pid()
+            try:
+                if not cls._attach(pid, timeout=2.0):
+                    return False
+                conin = cls._open_console("CONIN$")
+                if conin is None:
+                    return False
+                try:
+                    cls._write_key(conin, VK_RETURN, "\r")
+                    time.sleep(0.3)
+                    cls._write_text(conin, "~C")
+                    time.sleep(0.5)
+                    cls._write_text(conin, f"-L {spec}")
+                    cls._write_key(conin, VK_RETURN, "\r")
+                    return True
+                finally:
+                    kernel32.CloseHandle(conin)
+            finally:
+                kernel32.FreeConsole()
+                if original_pid:
+                    kernel32.AttachConsole(wt.DWORD(original_pid))
+
+    @classmethod
     def _peek_tail(cls, pid: int, lines: int = 4):
         """Attach briefly, read the last console lines, detach. None on failure."""
         original_pid = cls._sibling_console_pid()

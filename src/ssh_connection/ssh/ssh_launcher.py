@@ -71,11 +71,45 @@ class SshLauncher:
             else:
                 logging.info(f"Jump host {jump} not connected — launching it before {name}")
                 SshLauncher._launch(jump)
+        elif jump:
+            endpoint = SshLauncher._host_endpoint(name)
+            if endpoint and not SshLauncher._port_open(*endpoint):
+                SshLauncher.add_missing_forwards(jump)
         if jump:
             # The target connects through a LocalForward tunnel of the
             # jump host: wait until that port actually accepts
             # connections (the login may include a manual 2FA token).
             SshLauncher._wait_for_tunnel(name)
+
+    @staticmethod
+    def add_missing_forwards(jump: str) -> bool:
+        """Attach to the live `jump` session the LocalForwards added to the
+        config after it started, so a new host works without a new login.
+        Types ssh's `~C -L` into the jump console (sessions started by this
+        app have EnableEscapeCommandline). Returns True when every missing
+        port ended up listening."""
+        from .session_monitor import SessionMonitor
+        pid = tracker.get_pid(jump)
+        missing = SessionMonitor.missing_forward_ports(jump)
+        if not pid or not missing:
+            return not missing
+        specs = SessionMonitor.resolve_forward_specs(jump)
+        for port in missing:
+            if port in specs:
+                logging.info(f"Adding forward {specs[port]} to live {jump} (PID {pid})")
+                ConsoleInjector.add_local_forward(pid, specs[port])
+                time.sleep(0.5)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if not SessionMonitor.missing_forward_ports(jump):
+                return True
+            time.sleep(0.5)
+        logging.warning(f"Forwards {missing} not added to {jump}: session without "
+                        f"escape command line? A new Init is needed")
+        notifications.notify(
+            "init", "Porte non aggiunte",
+            f"{jump}: la sessione non accetta nuove porte. Rilancia Init per riaprirla.")
+        return False
 
     @staticmethod
     def _required_jump_host(name: str) -> Optional[str]:
@@ -248,7 +282,10 @@ class SshLauncher:
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
             startupinfo.wShowWindow = 0  # SW_HIDE
 
-        command = f"& '{SshLauncher._ssh_executable()}' {target}"
+        # Login hosts accept `~C -L` so forwards added to the config later can
+        # be attached to the live session (see add_missing_forwards).
+        options = " -o EnableEscapeCommandline=yes" if name.lower().startswith("login") else ""
+        command = f"& '{SshLauncher._ssh_executable()}'{options} {target}"
         if not hidden:
             command = SshLauncher._console_preamble(name) + command
         process = subprocess.Popen(

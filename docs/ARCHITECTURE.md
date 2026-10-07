@@ -115,6 +115,10 @@ Flusso di `connect(name)` (eseguito in un thread in background per non bloccare 
    Usa preferibilmente l'OpenSSH di Windows (`C:\Windows\System32\OpenSSH\ssh.exe`)
    perché risolve `~/.ssh/config` via `%USERPROFILE%` (l'ssh di Git usa `HOME`, che in
    questo ambiente punta altrove).
+   **Porte nuove a caldo**: se il jump host è attivo ma la porta di `name` non è aperta,
+   `add_missing_forwards(jump)` aggiunge alla sessione i `LocalForward` mancanti scrivendo
+   nella sua console `~C` + `-L` (`ConsoleInjector.add_local_forward`). I login sono lanciati
+   con `-o EnableEscapeCommandline=yes`, necessario da OpenSSH 9.2.
 4. **Password**: delega a `ConsoleInjector.inject_password(pid, password)`.
 5. **Keepalive**: sui jump host, dopo il login (incluso il token 2FA) invia
    `watch -n 240 date` al prompt della shell per tenere vivi sessione e tunnel.
@@ -146,6 +150,9 @@ token 2FA, apre un ambiente. Config in costante `INIT_ENVS = {TEST: {login, targ
 4. Attende i tunnel e apre i due host `stli*` iniettando solo la password, con
    `register=False` → invisibili nel menu. Tutte le console sono **nascoste** e ricevono
    il keepalive. Notifica finale via balloon tray.
+- **Porte nuove nel config**: il riuso del login vale solo se tutte le porte `LocalForward`
+  correnti (`SessionMonitor.missing_forward_ports`) sono in ascolto; altrimenti login e
+  target vengono chiusi e riaperti col nuovo token, così basta rilanciare Init.
 - **Perché due bottoni**: un singolo token SecurID autentica un solo login (il server
   rifiuta il riuso: *"Invalid username or password"* in sequenza, *"Session not started
   or timedout"* in contemporanea). Serve un token fresco per ambiente.

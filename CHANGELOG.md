@@ -26,6 +26,31 @@ annotati nella voce stessa. Formato ispirato a [Keep a Changelog](https://keepac
     la ricerca pre-filtrata, che l'hotkey globale non fa.
 
 ### Modificato
+- **2026-10-07** — **Token di Init visibile di default.** Il campo della finestra del token
+  mostra le cifre mentre le scrivi (prima erano `•`): un token SecurID dura pochi secondi e
+  un errore di battitura costa un login fallito. L'occhio accanto al campo lo nasconde.
+- **2026-10-07** — **Host nuovo fuori da Init: la porta si aggiunge al login già aperto.**
+  Cliccando una macchina la cui porta non è ancora inoltrata, `ensure_route` scrive nella
+  console del login il comando di escape di ssh (`Invio`, `~C`, `-L porta:dest:porta`,
+  `ConsoleInjector.add_local_forward`) e attende la porta: nessun nuovo login né token.
+  I login partono con `-o EnableEscapeCommandline=yes` (OpenSSH 9.2+ lo disattiva di
+  default). Se la porta non compare entro 5 s (sessione avviata prima di questa modifica)
+  parte una notifica che chiede di rilanciare Init.
+  - *Provato dal vivo* con login_test reale: porta 2299 aggiunta con keepalive `watch`
+    in esecuzione; poi 2298 aggiunta tramite una voce temporanea nel config (ripristinato
+    byte per byte), via `add_missing_forwards`.
+  - *Nota*: i login già aperti prima di questa versione non hanno l'opzione: serve un
+    ultimo Init per riaprirli.
+- **2026-10-07** — **Porte aggiunte al config attive riaprendo Init, senza chiudere l'app.**
+  Il login (`login_test`/`login_prod`) tiene solo i `LocalForward` letti all'avvio di ssh,
+  ma Init lo riusava se ancora vivo: le porte nuove restavano non inoltrate finché non si
+  chiudeva l'app (che uccide le console nascoste). Ora Init confronta i `LocalForward` di
+  `ssh -G login` con le porte in LISTEN (`SessionMonitor.missing_forward_ports`); se ne
+  manca qualcuna chiude login (anche se visibile, altrimenti il vecchio ssh terrebbe le
+  porte occupate) e target, e li riapre col token appena inserito.
+  - *Nota*: serve un nuovo login, quindi un token fresco: è già quello chiesto da Init.
+    Il click su un singolo host non riapre il login (non ha un token).
+  - `SessionMonitor._forward_ports` usa ora `resolve_forward_ports` (stessa logica, senza cache).
 - **2026-09-30** — **Finestra del token di Init TEST / Init PROD istantanea e a tema.**
   Era un dialog WinForms lanciato come processo PowerShell: circa **2,8 s** misurati
   prima ancora che esistesse la finestra (avvio di powershell.exe, caricamento degli
@@ -393,6 +418,18 @@ annotati nella voce stessa. Formato ispirato a [Keep a Changelog](https://keepac
 - **2026-09-28** — Build: `paramiko` aggiunto a `requirements.txt`, `setup.py` e alle
   dipendenze degli script di build. Nuovi hidden import PyInstaller:
   `file_search_dialog`, `remote_files`, `console_themes`, `paramiko`.
+- **2026-10-01** — Build release (`dist/SSH-Connection-Manager.exe` e `.zip`) con porte
+  inoltrate per host nella GUI, "Apri con" / scelta dell'editor e Impostazioni non più
+  sempre in primo piano. Verificato nel `PYZ` che `gui.text_editor`,
+  `gui.settings_dialog`, `gui.file_search_dialog`, `ssh.ssh_config_editor` e
+  `config.app_settings` siano inclusi. Lo zip contiene solo l'exe, come prima.
+  - L'app era in esecuzione dalla tray. Invece di chiuderla (avrebbe perso il monitor
+    delle sessioni aperte), l'exe in uso è stato **rinominato** in
+    `SSH-Connection-Manager.exe.old`: Windows lo permette per un exe in esecuzione, che
+    continua a girare, e PyInstaller scrive il nuovo exe al suo posto. Il `.old` va
+    cancellato dopo il riavvio dell'app; non è versionato.
+  - `-DEBUG.exe` non rigenerato. Prova di avvio non fatta: una seconda istanza
+    avrebbe aperto una seconda icona tray e conteso la hotkey all'app in uso.
 - **2026-09-30** — Build **release e debug** con navigazione cartelle, fix link simbolici,
   pannello host e ordinamento alfabetico (`dist/SSH-Connection-Manager.exe`, `.zip`,
   `-DEBUG.exe`). Moduli nuovi e `paramiko` verificati in entrambi i `PYZ`.
